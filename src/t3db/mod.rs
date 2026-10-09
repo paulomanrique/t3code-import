@@ -37,6 +37,9 @@ pub struct Snapshot {
     /// Enabled provider instance ids per driver, from T3's `settings.json`.
     /// The first entry is the default for that driver.
     pub provider_instances: HashMap<Provider, Vec<String>>,
+    /// Drivers switched off in T3's settings. Their threads import and show their
+    /// history, but T3 can't continue them until the provider is enabled.
+    pub disabled_providers: HashSet<Provider>,
 }
 
 pub fn snapshot(home: &T3Home) -> anyhow::Result<Snapshot> {

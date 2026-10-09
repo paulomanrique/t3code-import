@@ -307,6 +307,7 @@ fn parse_line(line: &str) -> Rec {
             }
             match role {
                 "assistant" => Rec::Assistant { text, at },
+                "user" if is_injected_context(&text) => Rec::Skip,
                 "user" => Rec::ResponseUser {
                     text,
                     turn_id: turn_id(payload),
@@ -317,6 +318,24 @@ fn parse_line(line: &str) -> Rec {
         }
         _ => Rec::Skip,
     }
+}
+
+/// Setup text Codex sends as a user message: project instructions, the
+/// environment block, plugin hints, abort notices. Interactive sessions also mark
+/// the real prompt with an `event_msg`, but `codex exec` rollouts don't, so match
+/// the wrappers: AGENTS.md, or a message that opens with a bare `<tag>` line.
+fn is_injected_context(text: &str) -> bool {
+    let text = text.trim_start();
+    if text.starts_with("# AGENTS.md instructions") {
+        return true;
+    }
+    let first = text.lines().next().unwrap_or("").trim();
+    first.len() > 2
+        && first.starts_with('<')
+        && first.ends_with('>')
+        && first[1..first.len() - 1]
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ' '))
 }
 
 fn cwd_of(payload: Option<&Value>, record: &Value) -> Option<String> {
@@ -626,7 +645,7 @@ mod tests {
 
         let archived = by_id(&sessions, "55555555-5555-4555-8555-555555555555");
         assert_eq!(archived.cwd, PathBuf::from("/tmp/archived"));
-        assert_eq!(archived.title, "<environment_context>");
+        assert_eq!(archived.title, "Initialize Git and add a README.");
 
         let fork = by_id(&sessions, "66666666-6666-4666-8666-666666666666");
         assert_eq!(fork.cwd, PathBuf::from("/tmp/fork"));
@@ -667,10 +686,7 @@ mod tests {
             .collect();
         assert_eq!(
             texts,
-            vec![
-                "<environment_context>\n<cwd>/tmp/archived</cwd>\n</environment_context>",
-                "Initialize Git and add a README."
-            ]
+            vec!["Initialize Git and add a README."]
         );
     }
 

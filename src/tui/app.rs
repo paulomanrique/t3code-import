@@ -164,6 +164,10 @@ impl App {
         }
     }
 
+    pub fn provider_disabled(&self, provider: Provider) -> bool {
+        self.snapshot.as_ref().is_some_and(|s| s.disabled_providers.contains(&provider))
+    }
+
     pub fn selectable(&self, idx: usize) -> bool {
         let s = &self.sessions[idx];
         s.resumable && !self.in_t3(idx) && self.instance_for(s.provider).is_some()

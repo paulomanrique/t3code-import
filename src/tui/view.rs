@@ -157,8 +157,8 @@ fn row_line(app: &App, row: Row, title_width: usize) -> Line<'static> {
                 spans.push(Span::styled("  in T3", Style::new().fg(Color::Green)));
             } else if !s.resumable {
                 spans.push(Span::styled("  not resumable", Style::new().fg(DIM)));
-            } else if app.instance_for(s.provider).is_none() && app.snapshot.is_some() {
-                spans.push(Span::styled("  provider off in T3", Style::new().fg(DIM)));
+            } else if app.provider_disabled(s.provider) {
+                spans.push(Span::styled(format!("  {} off in T3", s.provider.label()), Style::new().fg(Color::Yellow)));
             }
             Line::from(spans)
         }
@@ -308,6 +308,11 @@ fn draw_confirm(f: &mut Frame, app: &App) {
         "messages",
         app.max_messages.map(|n| format!("newest {n} per thread")).unwrap_or_else(|| "complete history".into()),
     ));
+    let off: Vec<&str> = Provider::ALL
+        .into_iter()
+        .filter(|&p| app.provider_disabled(p) && selected.iter().any(|&i| app.sessions[i].provider == p))
+        .map(Provider::label)
+        .collect();
     let projects = app.projects_to_create();
     if projects.is_empty() {
         lines.push(kv("projects", "all already exist in T3"));
@@ -319,6 +324,17 @@ fn draw_confirm(f: &mut Frame, app: &App) {
         if projects.len() > 6 {
             lines.push(Line::styled(format!("          … and {} more", projects.len() - 6), Style::new().fg(DIM)));
         }
+    }
+    if !off.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
+            format!(
+                "{} {} turned off in T3. Their threads import with full history, but you can only continue them after enabling the provider in T3's settings.",
+                off.join(" and "),
+                if off.len() == 1 { "is" } else { "are" }
+            ),
+            Style::new().fg(Color::Yellow),
+        ));
     }
     lines.push(Line::raw(""));
 

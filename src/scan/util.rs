@@ -35,7 +35,7 @@ pub(super) fn is_uuid(value: &str) -> bool {
 
 pub(super) fn clean_recorded_title(value: &str) -> Option<String> {
     let trimmed = value.trim();
-    if trimmed.is_empty() {
+    if trimmed.is_empty() || is_placeholder_title(trimmed) {
         None
     } else {
         Some(trimmed.to_string())
@@ -172,4 +172,12 @@ pub(super) fn plausible_model(value: &str) -> bool {
         && value
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':' | '/'))
+}
+
+/// Titles a CLI assigns before anything is said, like OpenCode's
+/// `New session - 2026-08-16T07:01:52.600Z`. The first prompt names it better.
+fn is_placeholder_title(title: &str) -> bool {
+    title
+        .strip_prefix("New session - ")
+        .is_some_and(|rest| rest.len() >= 10 && rest.as_bytes()[..4].iter().all(u8::is_ascii_digit))
 }

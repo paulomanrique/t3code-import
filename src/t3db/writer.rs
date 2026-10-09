@@ -43,6 +43,7 @@ pub fn snapshot(home: &T3Home) -> anyhow::Result<Snapshot> {
     let instances = settings.get("providerInstances").and_then(Value::as_object);
     for provider in Provider::ALL {
         let mut configured = Vec::new();
+        let mut disabled_ids = Vec::new();
         let mut present = false;
         if let Some(instances) = instances {
             for (id, instance) in instances {
@@ -54,12 +55,25 @@ pub fn snapshot(home: &T3Home) -> anyhow::Result<Snapshot> {
                         .unwrap_or(true)
                     {
                         configured.push(id.clone());
+                    } else {
+                        disabled_ids.push(id.clone());
                     }
                 }
             }
         }
         if !present {
             configured.push(provider.driver().into());
+        }
+        let builtin_off = settings
+            .get("providers")
+            .and_then(|p| p.get(provider.driver()))
+            .and_then(|p| p.get("enabled"))
+            .and_then(Value::as_bool)
+            == Some(false);
+        if configured.is_empty() || (!present && builtin_off) {
+            snapshot.disabled_providers.insert(provider);
+            // Still importable: the history is worth having before the provider is on.
+            configured.extend(disabled_ids);
         }
         configured.sort_by_key(|id| (id != provider.driver(), id.clone()));
         snapshot.provider_instances.insert(provider, configured);

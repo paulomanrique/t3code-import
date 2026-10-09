@@ -86,6 +86,12 @@ fn main() -> anyhow::Result<()> {
                     .iter()
                     .find(|s| s.provider == provider && s.session_id == id)
                     .with_context(|| format!("session not found: {spec}"))?;
+                if snapshot.disabled_providers.contains(&provider) {
+                    eprintln!(
+                        "warning: {} is turned off in T3; {spec} imports, but can only be continued after enabling it",
+                        provider.label()
+                    );
+                }
                 requests.push(request_for(&roots, &snapshot, summary)?);
             }
             let options = t3db::ImportOptions { max_messages, dry_run };
