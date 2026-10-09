@@ -188,12 +188,7 @@ fn cwd_of(dir: &Path, summary: Option<&SummaryFile>) -> PathBuf {
 
 fn load_dir(dir: &Path, summary: &SessionSummary) -> anyhow::Result<Transcript> {
     let mut summary = summary.clone();
-    let from_updates = messages_from_updates(&dir.join("updates.jsonl")).unwrap_or_default();
-    let messages = if from_updates.is_empty() {
-        messages_from_chat(&dir.join("chat_history.jsonl"), summary.created_at)
-    } else {
-        from_updates
-    };
+    let messages = select_messages(dir, summary.created_at);
     if summary.title == "Untitled" || summary.title.is_empty() {
         if let Some(text) = messages
             .iter()
@@ -217,9 +212,53 @@ fn load_dir(dir: &Path, summary: &SessionSummary) -> anyhow::Result<Transcript> 
     Ok(Transcript { summary, messages })
 }
 
-fn messages_from_updates(path: &Path) -> Option<Vec<Message>> {
-    let file = File::open(path).ok()?;
-    let reader = BufReader::new(file);
+enum Updates {
+    Missing,
+    Incomplete,
+    Messages(Vec<Message>),
+}
+
+/// `updates.jsonl` wins ties. A read error is incomplete, so `chat_history.jsonl`
+/// is used even when the updates file exists. A shorter updates file (a prompt
+/// with no reply yet) loses to the longer chat history.
+fn select_messages(dir: &Path, fallback: DateTime<Utc>) -> Vec<Message> {
+    let chat_path = dir.join("chat_history.jsonl");
+    match messages_from_updates(&dir.join("updates.jsonl")) {
+        Updates::Missing | Updates::Incomplete => messages_from_chat(&chat_path, fallback),
+        Updates::Messages(updates) => {
+            if !chat_path.is_file() {
+                return updates;
+            }
+            let chat = messages_from_chat(&chat_path, fallback);
+            if dialogue_count(&chat) > dialogue_count(&updates) {
+                chat
+            } else {
+                updates
+            }
+        }
+    }
+}
+
+fn dialogue_count(messages: &[Message]) -> usize {
+    messages
+        .iter()
+        .filter(|message| matches!(message.role, Role::User | Role::Assistant))
+        .count()
+}
+
+fn messages_from_updates(path: &Path) -> Updates {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Updates::Missing,
+        Err(_) => return Updates::Incomplete,
+    };
+    match updates_from_reader(BufReader::new(file)) {
+        Ok(messages) => Updates::Messages(messages),
+        Err(_) => Updates::Incomplete,
+    }
+}
+
+fn updates_from_reader(reader: impl BufRead) -> std::io::Result<Vec<Message>> {
     let mut messages = Vec::new();
     let mut pending_user: Option<(String, DateTime<Utc>)> = None;
     let mut pending_assistant: Option<(String, DateTime<Utc>)> = None;
@@ -243,7 +282,7 @@ fn messages_from_updates(path: &Path) -> Option<Vec<Message>> {
         }
     };
     for line in reader.lines() {
-        let Ok(line) = line else { continue };
+        let line = line?;
         if line.trim().is_empty() {
             continue;
         }
@@ -274,7 +313,7 @@ fn messages_from_updates(path: &Path) -> Option<Vec<Message>> {
     }
     flush_user(&mut pending_user, &mut messages);
     flush_assistant(&mut pending_assistant, &mut messages);
-    Some(messages)
+    Ok(messages)
 }
 
 fn messages_from_chat(path: &Path, fallback: DateTime<Utc>) -> Vec<Message> {
@@ -323,15 +362,7 @@ fn messages_from_chat(path: &Path, fallback: DateTime<Utc>) -> Vec<Message> {
 }
 
 fn first_user_text(dir: &Path) -> Option<String> {
-    if let Some(messages) = messages_from_updates(&dir.join("updates.jsonl")) {
-        if let Some(text) = messages
-            .into_iter()
-            .find(|message| message.role == Role::User)
-        {
-            return Some(text.text);
-        }
-    }
-    messages_from_chat(&dir.join("chat_history.jsonl"), DateTime::UNIX_EPOCH)
+    select_messages(dir, DateTime::UNIX_EPOCH)
         .into_iter()
         .find(|message| message.role == Role::User)
         .map(|message| message.text)
@@ -550,5 +581,84 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn prefers_the_richer_transcript() {
+        let scanner = fixture();
+        let sessions = scanner.scan().unwrap();
+        let truncated = scanner
+            .load(&by_id(&sessions, "77777777-7777-4777-8777-777777777777"))
+            .unwrap();
+        let texts: Vec<_> = truncated
+            .messages
+            .iter()
+            .map(|message| (message.role, message.text.as_str()))
+            .collect();
+        assert_eq!(
+            texts,
+            vec![
+                (Role::User, "Where is the reply"),
+                (Role::Assistant, "It is in the chat history.")
+            ]
+        );
+
+        let tie = scanner
+            .load(&by_id(&sessions, "88888888-8888-4888-8888-888888888888"))
+            .unwrap();
+        let texts: Vec<_> = tie
+            .messages
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect();
+        assert_eq!(texts, vec!["same prompt", "from updates"]);
+    }
+
+    #[test]
+    fn updates_read_error_uses_chat_history() {
+        let reader = BufReader::new(ErrorRead);
+        assert!(updates_from_reader(reader).is_err());
+
+        let dir =
+            std::env::temp_dir().join(format!("t3-import-grok-readerr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir(dir.join("updates.jsonl")).unwrap();
+        std::fs::write(
+            dir.join("chat_history.jsonl"),
+            "{\"type\":\"user\",\"content\":\"<user_query>\\nfrom chat\\n</user_query>\"}\n{\"type\":\"assistant\",\"content\":\"chat reply\"}\n",
+        )
+        .unwrap();
+        let transcript = load_dir(
+            &dir,
+            &SessionSummary {
+                provider: Provider::Grok,
+                session_id: "read-error".to_string(),
+                cwd: PathBuf::new(),
+                title: "Untitled".to_string(),
+                created_at: DateTime::UNIX_EPOCH,
+                updated_at: DateTime::UNIX_EPOCH,
+                message_count: None,
+                model: None,
+                source: dir.clone(),
+                resumable: false,
+            },
+        )
+        .unwrap();
+        let texts: Vec<_> = transcript
+            .messages
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect();
+        assert_eq!(texts, vec!["from chat", "chat reply"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    struct ErrorRead;
+
+    impl std::io::Read for ErrorRead {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("read failed"))
+        }
     }
 }

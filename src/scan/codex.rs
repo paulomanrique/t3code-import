@@ -320,22 +320,31 @@ fn parse_line(line: &str) -> Rec {
     }
 }
 
-/// Setup text Codex sends as a user message: project instructions, the
-/// environment block, plugin hints, abort notices. Interactive sessions also mark
-/// the real prompt with an `event_msg`, but `codex exec` rollouts don't, so match
-/// the wrappers: AGENTS.md, or a message that opens with a bare `<tag>` line.
+/// Opening lines Codex itself inserts as a user-role message. A prompt the user
+/// wrote that merely starts with a tag, such as `<request>`, is not in this list.
+/// Built from bare first lines of `response_item` user messages in local rollouts:
+/// `environment_context`, `subagent_notification`, `turn_aborted`, and
+/// `recommended_plugins`. `user_instructions` and `INSTRUCTIONS` are the same
+/// kind of setup wrapper (present in fixtures; not in the current home rollouts).
+const INJECTED_OPENERS: &[&str] = &[
+    "<INSTRUCTIONS>",
+    "<environment_context>",
+    "<recommended_plugins>",
+    "<subagent_notification>",
+    "<turn_aborted>",
+    "<user_instructions>",
+];
+
+/// Setup text Codex sends as a user message. Interactive sessions also mark the
+/// real prompt with an `event_msg`, but `codex exec` rollouts don't, so match
+/// known wrappers instead of every bare `<tag>`.
 fn is_injected_context(text: &str) -> bool {
     let text = text.trim_start();
     if text.starts_with("# AGENTS.md instructions") {
         return true;
     }
     let first = text.lines().next().unwrap_or("").trim();
-    first.len() > 2
-        && first.starts_with('<')
-        && first.ends_with('>')
-        && first[1..first.len() - 1]
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ' '))
+    INJECTED_OPENERS.contains(&first)
 }
 
 fn cwd_of(payload: Option<&Value>, record: &Value) -> Option<String> {
@@ -684,9 +693,57 @@ mod tests {
             .iter()
             .map(|message| message.text.as_str())
             .collect();
+        assert_eq!(texts, vec!["Initialize Git and add a README."]);
+    }
+
+    #[test]
+    fn keeps_prompts_that_open_with_a_tag() {
+        assert!(is_injected_context(
+            "# AGENTS.md instructions for /tmp/demo\n<INSTRUCTIONS>\nsecret\n</INSTRUCTIONS>"
+        ));
+        assert!(is_injected_context(
+            "<environment_context>\n<cwd>/tmp</cwd>\n</environment_context>"
+        ));
+        assert!(is_injected_context(
+            "<user_instructions>\nDo not mention this.\n</user_instructions>"
+        ));
+        assert!(is_injected_context(
+            "<INSTRUCTIONS>\nProject rules.\n</INSTRUCTIONS>"
+        ));
+        assert!(is_injected_context(
+            "<recommended_plugins>\n- Gmail\n</recommended_plugins>"
+        ));
+        assert!(is_injected_context(
+            "<turn_aborted>\nThe user interrupted the previous turn on purpose.\n</turn_aborted>"
+        ));
+        assert!(is_injected_context(
+            "<subagent_notification>\n{\"agent_path\":\"abc\"}\n</subagent_notification>"
+        ));
+        assert!(!is_injected_context(
+            "<request>\nFix the login bug\n</request>"
+        ));
+        assert!(!is_injected_context("<image>\n</image>"));
+        assert!(!is_injected_context(
+            "<heartbeat>\n  <automation_id>check</automation_id>\n</heartbeat>"
+        ));
+
+        let scanner = fixture();
+        let sessions = scanner.scan().unwrap();
+        let tagged = scanner
+            .load(&by_id(&sessions, "77777777-7777-4777-8777-777777777777"))
+            .unwrap();
+        let texts: Vec<_> = tagged
+            .messages
+            .iter()
+            .map(|message| (message.role, message.text.as_str()))
+            .collect();
         assert_eq!(
             texts,
-            vec!["Initialize Git and add a README."]
+            vec![
+                (Role::User, "<request>\nFix the login bug\n</request>"),
+                (Role::Assistant, "Fixed the login."),
+                (Role::User, "Keep going"),
+            ]
         );
     }
 

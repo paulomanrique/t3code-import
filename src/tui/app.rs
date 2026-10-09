@@ -187,6 +187,9 @@ impl App {
     }
 
     fn rebuild_groups(&mut self) {
+        // Capture focus before `groups` changes: a Row::Group index only means
+        // something against the groups it was taken from.
+        let keep = self.current_row_key();
         let expanded: HashSet<PathBuf> =
             self.groups.iter().filter(|g| g.expanded).map(|g| g.cwd.clone()).collect();
         let mut by_cwd: BTreeMap<PathBuf, Vec<usize>> = BTreeMap::new();
@@ -205,11 +208,15 @@ impl App {
             latest(b).cmp(&latest(a))
         });
         self.groups = groups;
-        self.rebuild_rows();
+        self.rebuild_rows_keeping(keep);
     }
 
     fn rebuild_rows(&mut self) {
         let keep = self.current_row_key();
+        self.rebuild_rows_keeping(keep);
+    }
+
+    fn rebuild_rows_keeping(&mut self, keep: Option<(bool, PathBuf, usize)>) {
         self.rows.clear();
         for (gi, g) in self.groups.iter().enumerate() {
             self.rows.push(Row::Group(gi));
@@ -400,7 +407,8 @@ impl App {
                 if let Some(g) = self.groups.iter_mut().find(|g| g.cwd == cwd) {
                     g.expanded = false;
                 }
-                self.rebuild_rows();
+                // The session row disappears; land on its project instead.
+                self.rebuild_rows_keeping(Some((true, cwd, 0)));
             }
             _ => {}
         }
@@ -491,5 +499,80 @@ fn describe(p: &Progress) -> String {
         Progress::CreatingProject(root) => format!("Creating project {}", root.display()),
         Progress::Writing { done, total } => format!("Writing threads {done}/{total}"),
         Progress::Verifying => "Verifying what was written".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+
+    use chrono::{TimeZone, Utc};
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use super::*;
+
+    fn session(cwd: &str, title: &str, minute: u32) -> SessionSummary {
+        let at = Utc.with_ymd_and_hms(2026, 10, 1, 12, minute, 0).unwrap();
+        SessionSummary {
+            provider: Provider::Claude,
+            session_id: format!("00000000-0000-4000-8000-0000000000{minute:02}"),
+            cwd: PathBuf::from(cwd),
+            title: title.into(),
+            created_at: at,
+            updated_at: at,
+            message_count: None,
+            model: None,
+            source: PathBuf::new(),
+            resumable: true,
+        }
+    }
+
+    fn app() -> App {
+        let (tx, _rx) = mpsc::channel();
+        let roots = Roots::detect();
+        let mut app = App::new(roots, None, tx);
+        // Newest first, so groups are A, B, C.
+        app.on_msg(Msg::Scanned(vec![
+            session("/a", "alpha", 3),
+            session("/b", "beta", 2),
+            session("/c", "gamma", 1),
+        ]));
+        app
+    }
+
+    fn key(app: &mut App, code: KeyCode) {
+        app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    fn focused_cwd(app: &App) -> PathBuf {
+        match app.current().unwrap() {
+            Row::Group(g) => app.groups[g].cwd.clone(),
+            Row::Session(i) => app.sessions[i].cwd.clone(),
+        }
+    }
+
+    #[test]
+    fn filtering_keeps_focus_on_the_same_project() {
+        let mut app = app();
+        key(&mut app, KeyCode::Down);
+        assert_eq!(focused_cwd(&app), PathBuf::from("/b"));
+        key(&mut app, KeyCode::Char('/'));
+        for c in "ta".chars() {
+            key(&mut app, KeyCode::Char(c)); // matches beta; alpha drops out
+        }
+        assert_eq!(focused_cwd(&app), PathBuf::from("/b"));
+    }
+
+    #[test]
+    fn collapsing_from_a_session_focuses_its_project() {
+        let mut app = app();
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::Right); // open /c
+        key(&mut app, KeyCode::Down); // its session
+        assert!(matches!(app.current(), Some(Row::Session(_))));
+        key(&mut app, KeyCode::Left);
+        assert!(matches!(app.current(), Some(Row::Group(_))));
+        assert_eq!(focused_cwd(&app), PathBuf::from("/c"));
     }
 }

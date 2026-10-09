@@ -1,0 +1,2 @@
+{"type": "user", "content": "<user_query>\nWhere is the reply\n</user_query>"}
+{"type": "assistant", "content": "It is in the chat history."}

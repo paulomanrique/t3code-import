@@ -1,0 +1,2 @@
+{"timestamp":1780000200,"method":"session/update","params":{"sessionId":"88888888-8888-4888-8888-888888888888","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"same prompt"}}}}
+{"timestamp":1780000201,"method":"session/update","params":{"sessionId":"88888888-8888-4888-8888-888888888888","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"from updates"}}}}

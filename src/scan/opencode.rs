@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::Context;
 use chrono::{DateTime, Utc};
@@ -59,6 +60,75 @@ fn db_path(root: &Path) -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
+/// Owns the private copy of an OpenCode database. The connection is closed
+/// before the directory is removed.
+struct SnapshotDb {
+    conn: Option<Connection>,
+    dir: PathBuf,
+}
+
+impl SnapshotDb {
+    fn connection(&self) -> &Connection {
+        self.conn.as_ref().expect("snapshot connection open")
+    }
+}
+
+impl Drop for SnapshotDb {
+    fn drop(&mut self) {
+        self.conn.take();
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Copy `opencode.db` and `opencode.db-wal` (if present) once, then open the
+/// copy. A read-only open of a live WAL database still creates and updates
+/// `opencode.db-shm` next to the real file; the copy keeps uncheckpointed
+/// frames and those writes stay in the temp directory.
+fn snapshot_db(src: &Path) -> anyhow::Result<SnapshotDb> {
+    let dir = unique_snapshot_dir()?;
+    match copy_and_open(src, &dir) {
+        Ok(conn) => Ok(SnapshotDb {
+            conn: Some(conn),
+            dir,
+        }),
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&dir);
+            Err(error)
+        }
+    }
+}
+
+fn unique_snapshot_dir() -> anyhow::Result<PathBuf> {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let base = std::env::temp_dir();
+    for _ in 0..1000 {
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = base.join(format!("t3-import-opencode-{}-{n}", std::process::id()));
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("create {}", dir.display()));
+            }
+        }
+    }
+    anyhow::bail!("could not create a private opencode snapshot directory")
+}
+
+fn copy_and_open(src: &Path, dir: &Path) -> anyhow::Result<Connection> {
+    let file_name = src.file_name().context("opencode database file name")?;
+    let dest = dir.join(file_name);
+    std::fs::copy(src, &dest).with_context(|| format!("copy {}", src.display()))?;
+    let mut wal_name = file_name.to_os_string();
+    wal_name.push("-wal");
+    let wal_src = src.with_file_name(&wal_name);
+    if wal_src.is_file() {
+        std::fs::copy(&wal_src, dir.join(&wal_name))
+            .with_context(|| format!("copy {}", wal_src.display()))?;
+    }
+    open_readonly(&dest)
+}
+
 fn open_readonly(path: &Path) -> anyhow::Result<Connection> {
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI;
     let primary = sqlite_uri(path, "mode=ro");
@@ -110,8 +180,9 @@ fn columns(conn: &Connection, table: &str) -> HashSet<String> {
 }
 
 fn scan_db(path: &Path) -> anyhow::Result<Vec<SessionSummary>> {
-    let conn = open_readonly(path)?;
-    let session_cols = columns(&conn, "session");
+    let db = snapshot_db(path)?;
+    let conn = db.connection();
+    let session_cols = columns(conn, "session");
     if !session_cols.contains("id") || !session_cols.contains("directory") {
         return Ok(Vec::new());
     }
@@ -124,20 +195,23 @@ fn scan_db(path: &Path) -> anyhow::Result<Vec<SessionSummary>> {
         "SELECT id, directory, title, time_created, time_updated, {model_sql} FROM session"
     );
     let mut statement = conn.prepare(&sql)?;
-    let rows = statement.query_map([], |row| {
-        Ok((
+    let mut rows = statement.query([])?;
+    let mut raw_rows = Vec::new();
+    while let Some(row) = rows.next()? {
+        raw_rows.push((
             row.get::<_, Option<String>>(0)?,
             row.get::<_, Option<String>>(1)?,
             row.get::<_, Option<String>>(2)?,
             row.get::<_, Option<i64>>(3)?,
             row.get::<_, Option<i64>>(4)?,
             row.get::<_, Option<String>>(5)?,
-        ))
-    })?;
-    let counts = message_counts(&conn);
+        ));
+    }
+    drop(rows);
+    drop(statement);
+    let counts = message_counts(conn)?;
     let mut sessions = Vec::new();
-    for row in rows.flatten() {
-        let (id, directory, title, created, updated, model) = row;
+    for (id, directory, title, created, updated, model) in raw_rows {
         let Some(id) = id.filter(|id| !id.trim().is_empty()) else {
             continue;
         };
@@ -147,14 +221,15 @@ fn scan_db(path: &Path) -> anyhow::Result<Vec<SessionSummary>> {
         let recorded = clean_recorded_title(title.as_deref().unwrap_or(""));
         let title = match recorded {
             Some(title) => title,
-            None => first_user_text(&conn, &id)
-                .map(|text| title_from_text(&text))
-                .unwrap_or_else(|| "Untitled".to_string()),
+            None => match first_user_text(conn, &id)? {
+                Some(text) => title_from_text(&text),
+                None => "Untitled".to_string(),
+            },
         };
-        let model = model
-            .as_deref()
-            .and_then(normalize_model)
-            .or_else(|| last_message_model(&conn, &id));
+        let model = match model.as_deref().and_then(normalize_model) {
+            Some(model) => Some(model),
+            None => last_message_model(conn, &id)?,
+        };
         sessions.push(SessionSummary {
             provider: Provider::OpenCode,
             session_id: id.clone(),
@@ -171,71 +246,114 @@ fn scan_db(path: &Path) -> anyhow::Result<Vec<SessionSummary>> {
     Ok(sessions)
 }
 
-fn message_counts(conn: &Connection) -> HashMap<String, usize> {
-    let mut counts = HashMap::new();
-    let sql = "
-        SELECT m.session_id, COUNT(DISTINCT m.id)
+fn message_counts(conn: &Connection) -> anyhow::Result<HashMap<String, usize>> {
+    let mut statement = conn.prepare(
+        "
+        SELECT m.session_id, m.id, m.data, p.data
         FROM message m
         JOIN part p ON p.message_id = m.id
-        WHERE json_extract(p.data, '$.type') = 'text'
-          AND length(trim(COALESCE(json_extract(p.data, '$.text'), ''))) > 0
-          AND json_extract(m.data, '$.role') IN ('user', 'assistant')
-        GROUP BY m.session_id
-    ";
-    let Ok(mut statement) = conn.prepare(sql) else {
-        return counts;
-    };
-    let Ok(rows) = statement.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-    }) else {
-        return counts;
-    };
-    for row in rows.flatten() {
-        counts.insert(row.0, row.1.max(0) as usize);
+        ",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut seen: HashMap<String, HashSet<String>> = HashMap::new();
+    while let Some(row) = rows.next()? {
+        let session_id: String = row.get(0)?;
+        let message_id: String = row.get(1)?;
+        let message_data: String = row.get(2)?;
+        let part_data: String = row.get(3)?;
+        let Some(message) = parse_data(&message_data) else {
+            continue;
+        };
+        let Some(part) = parse_data(&part_data) else {
+            continue;
+        };
+        let role = message.get("role").and_then(Value::as_str);
+        if role != Some("user") && role != Some("assistant") {
+            continue;
+        }
+        if text_part(&part).is_none() {
+            continue;
+        }
+        seen.entry(session_id).or_default().insert(message_id);
     }
-    counts
+    Ok(seen
+        .into_iter()
+        .map(|(session_id, ids)| (session_id, ids.len()))
+        .collect())
 }
 
-fn first_user_text(conn: &Connection, session_id: &str) -> Option<String> {
-    conn.query_row(
+fn first_user_text(conn: &Connection, session_id: &str) -> anyhow::Result<Option<String>> {
+    let mut statement = conn.prepare(
         "
-        SELECT json_extract(p.data, '$.text')
+        SELECT m.data, p.data
         FROM message m
         JOIN part p ON p.message_id = m.id
         WHERE m.session_id = ?1
-          AND json_extract(m.data, '$.role') = 'user'
-          AND json_extract(p.data, '$.type') = 'text'
-          AND length(trim(COALESCE(json_extract(p.data, '$.text'), ''))) > 0
         ORDER BY m.time_created, m.id, p.time_created, p.id
-        LIMIT 1
         ",
-        [session_id],
-        |row| row.get::<_, String>(0),
-    )
-    .ok()
+    )?;
+    let mut rows = statement.query([session_id])?;
+    while let Some(row) = rows.next()? {
+        let message_data: String = row.get(0)?;
+        let part_data: String = row.get(1)?;
+        let Some(message) = parse_data(&message_data) else {
+            continue;
+        };
+        if message.get("role").and_then(Value::as_str) != Some("user") {
+            continue;
+        }
+        let Some(part) = parse_data(&part_data) else {
+            continue;
+        };
+        if let Some(text) = text_part(&part) {
+            return Ok(Some(text));
+        }
+    }
+    Ok(None)
 }
 
-fn last_message_model(conn: &Connection, session_id: &str) -> Option<String> {
-    let model: String = conn
-        .query_row(
-            "
-            SELECT json_extract(data, '$.modelID')
-            FROM message
-            WHERE session_id = ?1
-              AND json_extract(data, '$.role') = 'assistant'
-              AND json_extract(data, '$.modelID') IS NOT NULL
-            ORDER BY time_created DESC, id DESC
-            LIMIT 1
-            ",
-            [session_id],
-            |row| row.get(0),
-        )
-        .ok()?;
-    let model = model.trim();
-    if model.is_empty() {
+fn last_message_model(conn: &Connection, session_id: &str) -> anyhow::Result<Option<String>> {
+    let mut statement = conn.prepare(
+        "
+        SELECT data
+        FROM message
+        WHERE session_id = ?1
+        ORDER BY time_created DESC, id DESC
+        ",
+    )?;
+    let mut rows = statement.query([session_id])?;
+    while let Some(row) = rows.next()? {
+        let data: String = row.get(0)?;
+        let Some(value) = parse_data(&data) else {
+            continue;
+        };
+        if value.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let Some(model) = value.get("modelID").and_then(Value::as_str) else {
+            continue;
+        };
+        let model = model.trim();
+        if !model.is_empty() {
+            return Ok(Some(model.to_string()));
+        }
+    }
+    Ok(None)
+}
+
+fn parse_data(raw: &str) -> Option<Value> {
+    serde_json::from_str(raw).ok()
+}
+
+fn text_part(value: &Value) -> Option<String> {
+    if value.get("type").and_then(Value::as_str) != Some("text") {
+        return None;
+    }
+    let text = value.get("text").and_then(Value::as_str)?;
+    if text.trim().is_empty() {
         None
     } else {
-        Some(model.to_string())
+        Some(text.to_string())
     }
 }
 
@@ -258,54 +376,53 @@ fn normalize_model(raw: &str) -> Option<String> {
 }
 
 fn load_db(path: &Path, summary: &SessionSummary) -> anyhow::Result<Transcript> {
-    let conn = open_readonly(path)?;
+    let db = snapshot_db(path)?;
+    let conn = db.connection();
     let mut messages_meta = Vec::new();
     {
         let mut statement = conn.prepare(
             "
-            SELECT id, time_created, json_extract(data, '$.role')
+            SELECT id, time_created, data
             FROM message
             WHERE session_id = ?1
             ORDER BY time_created, id
             ",
         )?;
-        let rows = statement.query_map([&summary.session_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, Option<String>>(2)?,
-            ))
-        })?;
-        for row in rows.flatten() {
-            messages_meta.push(row);
+        let mut rows = statement.query([&summary.session_id])?;
+        while let Some(row) = rows.next()? {
+            let id: String = row.get(0)?;
+            let created: i64 = row.get(1)?;
+            let data: String = row.get(2)?;
+            let Some(value) = parse_data(&data) else {
+                continue;
+            };
+            let role = value
+                .get("role")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            messages_meta.push((id, created, role));
         }
     }
     let mut parts: HashMap<String, Vec<String>> = HashMap::new();
     {
         let mut statement = conn.prepare(
             "
-            SELECT message_id, json_extract(data, '$.type'), json_extract(data, '$.text')
+            SELECT message_id, data
             FROM part
             WHERE session_id = ?1
             ORDER BY time_created, id
             ",
         )?;
-        let rows = statement.query_map([&summary.session_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-            ))
-        })?;
-        for row in rows.flatten() {
-            let (message_id, kind, text) = row;
-            if kind.as_deref() != Some("text") {
+        let mut rows = statement.query([&summary.session_id])?;
+        while let Some(row) = rows.next()? {
+            let message_id: String = row.get(0)?;
+            let data: String = row.get(1)?;
+            let Some(value) = parse_data(&data) else {
                 continue;
-            }
-            let Some(text) = text else { continue };
-            if text.trim().is_empty() {
+            };
+            let Some(text) = text_part(&value) else {
                 continue;
-            }
+            };
             parts.entry(message_id).or_default().push(text);
         }
     }
@@ -331,7 +448,7 @@ fn load_db(path: &Path, summary: &SessionSummary) -> anyhow::Result<Transcript> 
         });
     }
     if model.is_none() {
-        model = last_message_model(&conn, &summary.session_id);
+        model = last_message_model(conn, &summary.session_id)?;
     }
     let mut summary = summary.clone();
     if summary.title.trim().is_empty() || summary.title == "Untitled" {
@@ -677,5 +794,148 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn skips_malformed_json_without_dropping_later_rows() {
+        let scanner = OpenCodeScanner::new(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/opencode-bad-json"),
+        );
+        let sessions = scanner.scan().unwrap();
+        let summary = by_id(&sessions, "ses_badjson");
+        assert_eq!(summary.message_count, Some(3));
+        assert_eq!(summary.model.as_deref(), Some("after-model"));
+        assert_eq!(summary.title, "Malformed rows");
+        let transcript = scanner.load(&summary).unwrap();
+        let texts: Vec<_> = transcript
+            .messages
+            .iter()
+            .map(|message| (message.role, message.text.as_str()))
+            .collect();
+        assert_eq!(
+            texts,
+            vec![
+                (Role::User, "kept before"),
+                (Role::Assistant, "kept after"),
+                (Role::User, "second prompt"),
+            ]
+        );
+    }
+
+    #[test]
+    fn reads_uncheckpointed_wal_without_writing_beside_the_source() {
+        let root =
+            std::env::temp_dir().join(format!("t3-import-opencode-wal-src-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("opencode.db");
+        let scratch = root.join("scratch.db");
+        {
+            let conn = Connection::open(&scratch).unwrap();
+            conn.execute_batch(
+                "
+                PRAGMA journal_mode=WAL;
+                PRAGMA wal_autocheckpoint=0;
+                CREATE TABLE session (
+                  id TEXT PRIMARY KEY,
+                  directory TEXT NOT NULL,
+                  title TEXT NOT NULL,
+                  time_created INTEGER NOT NULL,
+                  time_updated INTEGER NOT NULL,
+                  model TEXT
+                );
+                CREATE TABLE message (
+                  id TEXT PRIMARY KEY,
+                  session_id TEXT NOT NULL,
+                  time_created INTEGER NOT NULL,
+                  data TEXT NOT NULL
+                );
+                CREATE TABLE part (
+                  id TEXT PRIMARY KEY,
+                  session_id TEXT NOT NULL,
+                  message_id TEXT NOT NULL,
+                  time_created INTEGER NOT NULL,
+                  data TEXT NOT NULL
+                );
+                INSERT INTO session VALUES (
+                  'ses_base', '/tmp/wal', 'Base', 1, 1, NULL
+                );
+                INSERT INTO message VALUES (
+                  'msg_base', 'ses_base', 1, '{\"role\":\"user\"}'
+                );
+                INSERT INTO part VALUES (
+                  'prt_base', 'ses_base', 'msg_base', 1,
+                  '{\"type\":\"text\",\"text\":\"already checkpointed\"}'
+                );
+                ",
+            )
+            .unwrap();
+            conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+                .unwrap();
+            conn.execute_batch(
+                "
+                INSERT INTO session VALUES (
+                  'ses_wal', '/tmp/wal', 'Only in the wal', 2, 2, NULL
+                );
+                INSERT INTO message VALUES (
+                  'msg_wal', 'ses_wal', 2, '{\"role\":\"user\"}'
+                );
+                INSERT INTO part VALUES (
+                  'prt_wal', 'ses_wal', 'msg_wal', 2,
+                  '{\"type\":\"text\",\"text\":\"uncheckpointed reply\"}'
+                );
+                ",
+            )
+            .unwrap();
+            std::fs::copy(&scratch, &source).unwrap();
+            let wal = scratch.with_file_name("scratch.db-wal");
+            assert!(wal.is_file());
+            assert!(wal.metadata().unwrap().len() > 0);
+            std::fs::copy(&wal, root.join("opencode.db-wal")).unwrap();
+        }
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI;
+        let immutable =
+            Connection::open_with_flags(sqlite_uri(&source, "mode=ro&immutable=1"), flags).unwrap();
+        let visible: i64 = immutable
+            .query_row(
+                "SELECT COUNT(*) FROM session WHERE id = 'ses_wal'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(visible, 0, "ses_wal must live only in the copied wal");
+        drop(immutable);
+
+        let before = std::fs::read(&source).unwrap();
+        let wal_before = std::fs::read(root.join("opencode.db-wal")).unwrap();
+        assert!(!root.join("opencode.db-shm").exists());
+
+        let sessions = scan_db(&source).unwrap();
+        assert!(
+            sessions
+                .iter()
+                .any(|session| session.session_id == "ses_wal")
+        );
+        assert!(
+            sessions
+                .iter()
+                .any(|session| session.session_id == "ses_base")
+        );
+        let summary = sessions
+            .iter()
+            .find(|session| session.session_id == "ses_wal")
+            .unwrap();
+        assert_eq!(summary.message_count, Some(1));
+        let transcript = load_db(&source, summary).unwrap();
+        assert_eq!(transcript.messages.len(), 1);
+        assert_eq!(transcript.messages[0].text, "uncheckpointed reply");
+
+        assert_eq!(std::fs::read(&source).unwrap(), before);
+        assert_eq!(
+            std::fs::read(root.join("opencode.db-wal")).unwrap(),
+            wal_before
+        );
+        assert!(!root.join("opencode.db-shm").exists());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -61,12 +61,14 @@ pub(super) fn parse_rfc3339(value: &str) -> Option<DateTime<Utc>> {
 }
 
 pub(super) fn unix_to_utc(raw: i64) -> DateTime<Utc> {
-    let (secs, nanos) = if raw.abs() > 10_000_000_000_000 {
+    // `i64::abs` panics on `i64::MIN` when overflow checks are on.
+    let magnitude = raw.unsigned_abs();
+    let (secs, nanos) = if magnitude > 10_000_000_000_000 {
         (
             raw.div_euclid(1_000_000),
             raw.rem_euclid(1_000_000) as u32 * 1_000,
         )
-    } else if raw.abs() > 10_000_000_000 {
+    } else if magnitude > 10_000_000_000 {
         (
             raw.div_euclid(1_000),
             raw.rem_euclid(1_000) as u32 * 1_000_000,
@@ -180,4 +182,31 @@ fn is_placeholder_title(title: &str) -> bool {
     title
         .strip_prefix("New session - ")
         .is_some_and(|rest| rest.len() >= 10 && rest.as_bytes()[..4].iter().all(u8::is_ascii_digit))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unix_to_utc_handles_i64_min() {
+        let secs = i64::MIN.div_euclid(1_000_000);
+        let nanos = i64::MIN.rem_euclid(1_000_000) as u32 * 1_000;
+        assert_eq!(
+            unix_to_utc(i64::MIN),
+            DateTime::from_timestamp(secs, nanos).unwrap_or(DateTime::UNIX_EPOCH)
+        );
+        assert_eq!(
+            unix_to_utc(1_700_000_000),
+            DateTime::from_timestamp(1_700_000_000, 0).unwrap()
+        );
+        assert_eq!(
+            unix_to_utc(1_700_000_000_123),
+            DateTime::from_timestamp(1_700_000_000, 123_000_000).unwrap()
+        );
+        assert_eq!(
+            unix_to_utc(1_700_000_000_123_456),
+            DateTime::from_timestamp(1_700_000_000, 123_456_000).unwrap()
+        );
+    }
 }

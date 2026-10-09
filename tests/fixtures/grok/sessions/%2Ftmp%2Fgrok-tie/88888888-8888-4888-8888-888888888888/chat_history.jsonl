@@ -1,0 +1,2 @@
+{"type": "user", "content": "<user_query>\nsame prompt\n</user_query>"}
+{"type": "assistant", "content": "from chat"}
