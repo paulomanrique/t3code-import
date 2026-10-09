@@ -6,7 +6,10 @@
 
 pub mod guard;
 pub mod home;
+mod payload;
 pub mod placement;
+#[cfg(test)]
+mod tests;
 pub mod writer;
 
 use std::collections::{HashMap, HashSet};

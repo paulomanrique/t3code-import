@@ -1,0 +1,271 @@
+# Captured read-only from statev2.sqlite, 2026-10-09. Includes implicit indexes.
+
+[[objects]]
+type = "index"
+name = "idx_orch_events_command_id"
+tbl_name = "orchestration_events"
+sql = "CREATE INDEX idx_orch_events_command_id\n    ON orchestration_events(command_id)\n  "
+
+[[objects]]
+type = "index"
+name = "idx_orch_events_correlation_id"
+tbl_name = "orchestration_events"
+sql = "CREATE INDEX idx_orch_events_correlation_id\n    ON orchestration_events(correlation_id)\n  "
+
+[[objects]]
+type = "index"
+name = "idx_orch_events_stream_sequence"
+tbl_name = "orchestration_events"
+sql = "CREATE INDEX idx_orch_events_stream_sequence\n    ON orchestration_events(aggregate_kind, stream_id, sequence)\n  "
+
+[[objects]]
+type = "index"
+name = "idx_orch_events_stream_version"
+tbl_name = "orchestration_events"
+sql = "CREATE UNIQUE INDEX idx_orch_events_stream_version\n    ON orchestration_events(aggregate_kind, stream_id, stream_version)\n  "
+
+[[objects]]
+type = "index"
+name = "idx_orchestration_events_agent_stream_sequence"
+tbl_name = "orchestration_events"
+sql = "CREATE INDEX idx_orchestration_events_agent_stream_sequence\n    ON orchestration_events(stream_id, sequence)\n    WHERE application_event_version = 2 AND aggregate_kind = 'thread'\n  "
+
+[[objects]]
+type = "index"
+name = "idx_orchestration_events_application_high_water"
+tbl_name = "orchestration_events"
+sql = "CREATE INDEX idx_orchestration_events_application_high_water\n    ON orchestration_events(sequence)\n    WHERE aggregate_kind = 'project'\n      OR (application_event_version = 2 AND aggregate_kind = 'thread')\n  "
+
+[[objects]]
+type = "index"
+name = "idx_orchestration_events_application_sequence"
+tbl_name = "orchestration_events"
+sql = "CREATE INDEX idx_orchestration_events_application_sequence\n    ON orchestration_events(application_event_version, sequence)\n  "
+
+[[objects]]
+type = "index"
+name = "idx_provider_session_runtime_instance"
+tbl_name = "provider_session_runtime"
+sql = "CREATE INDEX idx_provider_session_runtime_instance\n    ON provider_session_runtime(provider_instance_id)\n  "
+
+[[objects]]
+type = "index"
+name = "idx_provider_session_runtime_provider"
+tbl_name = "provider_session_runtime"
+sql = "CREATE INDEX idx_provider_session_runtime_provider\n    ON provider_session_runtime(provider_name)\n  "
+
+[[objects]]
+type = "index"
+name = "idx_provider_session_runtime_status"
+tbl_name = "provider_session_runtime"
+sql = "CREATE INDEX idx_provider_session_runtime_status\n    ON provider_session_runtime(status)\n  "
+
+[[objects]]
+type = "table"
+name = "orchestration_events"
+tbl_name = "orchestration_events"
+sql = "CREATE TABLE orchestration_events (\n      sequence INTEGER PRIMARY KEY AUTOINCREMENT,\n      event_id TEXT NOT NULL UNIQUE,\n      aggregate_kind TEXT NOT NULL,\n      stream_id TEXT NOT NULL,\n      stream_version INTEGER NOT NULL,\n      event_type TEXT NOT NULL,\n      occurred_at TEXT NOT NULL,\n      command_id TEXT,\n      causation_event_id TEXT,\n      correlation_id TEXT,\n      actor_kind TEXT NOT NULL,\n      payload_json TEXT NOT NULL,\n      metadata_json TEXT NOT NULL\n    , application_event_version INTEGER NOT NULL DEFAULT 1)"
+
+[[objects]]
+type = "index"
+name = "orchestration_events_v2_created_threads_idx"
+tbl_name = "orchestration_events"
+sql = "CREATE INDEX orchestration_events_v2_created_threads_idx\n    ON orchestration_events(stream_id)\n    WHERE application_event_version = 2\n      AND aggregate_kind = 'thread'\n      AND event_type = 'thread.created'\n  "
+
+[[objects]]
+type = "table"
+name = "orchestration_v2_projection_messages"
+tbl_name = "orchestration_v2_projection_messages"
+sql = "CREATE TABLE orchestration_v2_projection_messages (\n      message_id TEXT PRIMARY KEY,\n      thread_id TEXT NOT NULL,\n      run_id TEXT,\n      node_id TEXT,\n      role TEXT NOT NULL,\n      streaming INTEGER NOT NULL,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      payload_json TEXT NOT NULL\n    )"
+
+[[objects]]
+type = "index"
+name = "orchestration_v2_projection_messages_latest_user_idx"
+tbl_name = "orchestration_v2_projection_messages"
+sql = "CREATE INDEX orchestration_v2_projection_messages_latest_user_idx\n    ON orchestration_v2_projection_messages(thread_id, updated_at DESC, message_id DESC)\n    WHERE role = 'user'\n  "
+
+[[objects]]
+type = "index"
+name = "orchestration_v2_projection_messages_node_idx"
+tbl_name = "orchestration_v2_projection_messages"
+sql = "CREATE INDEX orchestration_v2_projection_messages_node_idx ON orchestration_v2_projection_messages(node_id)"
+
+[[objects]]
+type = "index"
+name = "orchestration_v2_projection_messages_run_idx"
+tbl_name = "orchestration_v2_projection_messages"
+sql = "CREATE INDEX orchestration_v2_projection_messages_run_idx ON orchestration_v2_projection_messages(run_id)"
+
+[[objects]]
+type = "index"
+name = "orchestration_v2_projection_messages_thread_created_idx"
+tbl_name = "orchestration_v2_projection_messages"
+sql = "CREATE INDEX orchestration_v2_projection_messages_thread_created_idx ON orchestration_v2_projection_messages(thread_id, created_at, message_id)"
+
+[[objects]]
+type = "table"
+name = "orchestration_v2_projection_metadata"
+tbl_name = "orchestration_v2_projection_metadata"
+sql = "CREATE TABLE orchestration_v2_projection_metadata (\n      projection_name TEXT PRIMARY KEY,\n      schema_version INTEGER NOT NULL,\n      last_sequence INTEGER NOT NULL,\n      updated_at TEXT NOT NULL\n    )"
+
+[[objects]]
+type = "table"
+name = "orchestration_v2_projection_provider_threads"
+tbl_name = "orchestration_v2_projection_provider_threads"
+sql = "CREATE TABLE orchestration_v2_projection_provider_threads (\n      provider_thread_id TEXT PRIMARY KEY,\n      thread_id TEXT,\n      owner_node_id TEXT,\n      provider TEXT NOT NULL,\n      provider_session_id TEXT,\n      status TEXT NOT NULL,\n      first_run_ordinal INTEGER,\n      last_run_ordinal INTEGER,\n      updated_at TEXT NOT NULL,\n      payload_json TEXT NOT NULL\n    , driver TEXT, provider_instance_id TEXT)"
+
+[[objects]]
+type = "index"
+name = "orchestration_v2_projection_provider_threads_instance_status_idx"
+tbl_name = "orchestration_v2_projection_provider_threads"
+sql = "CREATE INDEX orchestration_v2_projection_provider_threads_instance_status_idx ON orchestration_v2_projection_provider_threads(provider_instance_id, status)"
+
+[[objects]]
+type = "index"
+name = "orchestration_v2_projection_provider_threads_owner_idx"
+tbl_name = "orchestration_v2_projection_provider_threads"
+sql = "CREATE INDEX orchestration_v2_projection_provider_threads_owner_idx ON orchestration_v2_projection_provider_threads(owner_node_id)"
+
+[[objects]]
+type = "index"
+name = "orchestration_v2_projection_provider_threads_session_idx"
+tbl_name = "orchestration_v2_projection_provider_threads"
+sql = "CREATE INDEX orchestration_v2_projection_provider_threads_session_idx ON orchestration_v2_projection_provider_threads(provider_session_id)"
+
+[[objects]]
+type = "index"
+name = "orchestration_v2_projection_provider_threads_thread_idx"
+tbl_name = "orchestration_v2_projection_provider_threads"
+sql = "CREATE INDEX orchestration_v2_projection_provider_threads_thread_idx ON orchestration_v2_projection_provider_threads(thread_id)"
+
+[[objects]]
+type = "table"
+name = "orchestration_v2_projection_threads"
+tbl_name = "orchestration_v2_projection_threads"
+sql = "CREATE TABLE orchestration_v2_projection_threads (\n      thread_id TEXT PRIMARY KEY,\n      project_id TEXT NOT NULL,\n      title TEXT NOT NULL,\n      default_provider TEXT NOT NULL,\n      runtime_mode TEXT NOT NULL,\n      interaction_mode TEXT NOT NULL,\n      active_provider_thread_id TEXT,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      archived_at TEXT,\n      deleted_at TEXT,\n      payload_json TEXT NOT NULL\n    , provider_instance_id TEXT)"
+
+[[objects]]
+type = "index"
+name = "orchestration_v2_projection_threads_project_updated_idx"
+tbl_name = "orchestration_v2_projection_threads"
+sql = "CREATE INDEX orchestration_v2_projection_threads_project_updated_idx ON orchestration_v2_projection_threads(project_id, updated_at)"
+
+[[objects]]
+type = "table"
+name = "orchestration_v2_projection_turn_items"
+tbl_name = "orchestration_v2_projection_turn_items"
+sql = "CREATE TABLE orchestration_v2_projection_turn_items (\n      turn_item_id TEXT PRIMARY KEY,\n      thread_id TEXT NOT NULL,\n      run_id TEXT,\n      node_id TEXT,\n      provider_thread_id TEXT,\n      provider_turn_id TEXT,\n      parent_item_id TEXT,\n      ordinal INTEGER NOT NULL,\n      type TEXT NOT NULL,\n      status TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      payload_json TEXT NOT NULL\n    )"
+
+[[objects]]
+type = "index"
+name = "orchestration_v2_projection_turn_items_node_ordinal_idx"
+tbl_name = "orchestration_v2_projection_turn_items"
+sql = "CREATE INDEX orchestration_v2_projection_turn_items_node_ordinal_idx ON orchestration_v2_projection_turn_items(node_id, ordinal)"
+
+[[objects]]
+type = "index"
+name = "orchestration_v2_projection_turn_items_provider_turn_idx"
+tbl_name = "orchestration_v2_projection_turn_items"
+sql = "CREATE INDEX orchestration_v2_projection_turn_items_provider_turn_idx ON orchestration_v2_projection_turn_items(provider_turn_id)"
+
+[[objects]]
+type = "index"
+name = "orchestration_v2_projection_turn_items_recovery_idx"
+tbl_name = "orchestration_v2_projection_turn_items"
+sql = "CREATE INDEX orchestration_v2_projection_turn_items_recovery_idx\n    ON orchestration_v2_projection_turn_items(thread_id)\n    WHERE type IN ('command_execution', 'dynamic_tool', 'subagent')\n      AND status IN ('pending', 'running', 'waiting')\n  "
+
+[[objects]]
+type = "index"
+name = "orchestration_v2_projection_turn_items_run_ordinal_idx"
+tbl_name = "orchestration_v2_projection_turn_items"
+sql = "CREATE INDEX orchestration_v2_projection_turn_items_run_ordinal_idx ON orchestration_v2_projection_turn_items(run_id, ordinal)"
+
+[[objects]]
+type = "index"
+name = "orchestration_v2_projection_turn_items_shell_pending_idx"
+tbl_name = "orchestration_v2_projection_turn_items"
+sql = "CREATE INDEX orchestration_v2_projection_turn_items_shell_pending_idx\n    ON orchestration_v2_projection_turn_items(thread_id, run_id)\n    WHERE type IN ('command_execution', 'dynamic_tool', 'subagent')\n      AND status NOT IN ('completed', 'interrupted', 'failed', 'cancelled')\n  "
+
+[[objects]]
+type = "index"
+name = "orchestration_v2_projection_turn_items_thread_ordinal_idx"
+tbl_name = "orchestration_v2_projection_turn_items"
+sql = "CREATE INDEX orchestration_v2_projection_turn_items_thread_ordinal_idx ON orchestration_v2_projection_turn_items(thread_id, ordinal, turn_item_id)"
+
+[[objects]]
+type = "index"
+name = "orchestration_v2_projection_turn_items_thread_run_idx"
+tbl_name = "orchestration_v2_projection_turn_items"
+sql = "CREATE INDEX orchestration_v2_projection_turn_items_thread_run_idx\n    ON orchestration_v2_projection_turn_items(thread_id, run_id)\n  "
+
+[[objects]]
+type = "index"
+name = "orchestration_v2_projection_turn_items_user_message_idx"
+tbl_name = "orchestration_v2_projection_turn_items"
+sql = "CREATE INDEX orchestration_v2_projection_turn_items_user_message_idx\n    ON orchestration_v2_projection_turn_items(thread_id, ordinal, turn_item_id)\n    WHERE type = 'user_message'\n  "
+
+[[objects]]
+type = "table"
+name = "orchestration_v2_turn_item_positions"
+tbl_name = "orchestration_v2_turn_item_positions"
+sql = "CREATE TABLE orchestration_v2_turn_item_positions (\n      thread_id TEXT NOT NULL,\n      turn_item_id TEXT NOT NULL,\n      ordinal INTEGER NOT NULL,\n      PRIMARY KEY (thread_id, turn_item_id),\n      UNIQUE (thread_id, ordinal)\n    )"
+
+[[objects]]
+type = "table"
+name = "provider_session_runtime"
+tbl_name = "provider_session_runtime"
+sql = "CREATE TABLE provider_session_runtime (\n      thread_id TEXT PRIMARY KEY,\n      provider_name TEXT NOT NULL,\n      adapter_key TEXT NOT NULL,\n      runtime_mode TEXT NOT NULL DEFAULT 'full-access',\n      status TEXT NOT NULL,\n      last_seen_at TEXT NOT NULL,\n      resume_cursor_json TEXT,\n      runtime_payload_json TEXT\n    , provider_instance_id TEXT)"
+
+[[objects]]
+type = "index"
+name = "sqlite_autoindex_orchestration_events_1"
+tbl_name = "orchestration_events"
+sql = ""
+
+[[objects]]
+type = "index"
+name = "sqlite_autoindex_orchestration_v2_projection_messages_1"
+tbl_name = "orchestration_v2_projection_messages"
+sql = ""
+
+[[objects]]
+type = "index"
+name = "sqlite_autoindex_orchestration_v2_projection_metadata_1"
+tbl_name = "orchestration_v2_projection_metadata"
+sql = ""
+
+[[objects]]
+type = "index"
+name = "sqlite_autoindex_orchestration_v2_projection_provider_threads_1"
+tbl_name = "orchestration_v2_projection_provider_threads"
+sql = ""
+
+[[objects]]
+type = "index"
+name = "sqlite_autoindex_orchestration_v2_projection_threads_1"
+tbl_name = "orchestration_v2_projection_threads"
+sql = ""
+
+[[objects]]
+type = "index"
+name = "sqlite_autoindex_orchestration_v2_projection_turn_items_1"
+tbl_name = "orchestration_v2_projection_turn_items"
+sql = ""
+
+[[objects]]
+type = "index"
+name = "sqlite_autoindex_orchestration_v2_turn_item_positions_1"
+tbl_name = "orchestration_v2_turn_item_positions"
+sql = ""
+
+[[objects]]
+type = "index"
+name = "sqlite_autoindex_orchestration_v2_turn_item_positions_2"
+tbl_name = "orchestration_v2_turn_item_positions"
+sql = ""
+
+[[objects]]
+type = "index"
+name = "sqlite_autoindex_provider_session_runtime_1"
+tbl_name = "provider_session_runtime"
+sql = ""
