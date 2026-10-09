@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>t3-import — importar threads de CLIs para o T3 Code</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #fbfbfa;
+    --panel: #ffffff;
+    --ink: #1b1b19;
+    --muted: #6b6b66;
+    --rule: #e4e4df;
+    --accent: #b5502a;
+    --code-bg: #f2f2ee;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16161a;
+      --panel: #1d1d22;
+      --ink: #e9e9e6;
+      --muted: #9a9a94;
+      --rule: #2e2e35;
+      --accent: #e08a5f;
+      --code-bg: #26262c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 3rem 1.25rem 6rem;
+    background: var(--bg);
+    color: var(--ink);
+    font: 16px/1.65 ui-sans-serif, -apple-system, "Segoe UI", Inter, system-ui, sans-serif;
+    -webkit-text-size-adjust: 100%;
+  }
+  main { max-width: 46rem; margin: 0 auto; }
+  header { border-bottom: 1px solid var(--rule); padding-bottom: 1.5rem; margin-bottom: 2.5rem; }
+  .eyebrow {
+    font-size: .75rem; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--accent); font-weight: 600; margin: 0 0 .6rem;
+  }
+  h1 { font-size: clamp(1.6rem, 4.5vw, 2.3rem); line-height: 1.2; margin: 0 0 .6rem; letter-spacing: -.02em; }
+  .meta { color: var(--muted); font-size: .875rem; margin: 0; }
+  h2 {
+    font-size: 1.15rem; margin: 2.75rem 0 .85rem; letter-spacing: -.01em;
+    padding-top: 1.25rem; border-top: 1px solid var(--rule);
+  }
+  h3 { font-size: .98rem; margin: 1.75rem 0 .5rem; }
+  p, li { color: var(--ink); }
+  ul, ol { padding-left: 1.3rem; }
+  li { margin: .35rem 0; }
+  li::marker { color: var(--muted); }
+  .lede { font-size: 1.05rem; color: var(--muted); }
+  code {
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+    font-size: .875em; background: var(--code-bg); padding: .12em .38em; border-radius: 4px;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--rule); border-radius: 8px;
+    padding: .9rem 1rem; overflow-x: auto; font-size: .85rem; line-height: 1.5;
+  }
+  pre code { background: none; padding: 0; }
+  .card {
+    background: var(--panel); border: 1px solid var(--rule); border-radius: 10px;
+    padding: 1.1rem 1.25rem; margin: 1.25rem 0;
+  }
+  .card h3 { margin-top: 0; }
+  table { width: 100%; border-collapse: collapse; font-size: .9rem; margin: 1rem 0; display: block; overflow-x: auto; }
+  th, td { text-align: left; padding: .55rem .7rem; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th { font-size: .75rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 600; }
+  .tag {
+    display: inline-block; font-size: .72rem; font-weight: 600; letter-spacing: .04em;
+    padding: .15rem .5rem; border-radius: 999px; border: 1px solid var(--rule); color: var(--muted);
+  }
+  footer { margin-top: 3.5rem; padding-top: 1.25rem; border-top: 1px solid var(--rule); color: var(--muted); font-size: .8rem; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <p class="eyebrow">Implementation plan</p>
+    <h1>t3-import: trazer threads de Claude, Codex, Grok e OpenCode para o T3 Code</h1>
+    <p class="meta">novo repo t3code-import (Rust) · 2026-10-08 · v3 (revisado por gpt-6.1-sol)</p>
+  </header>
+
+  <p class="lede">Um binário Rust portátil que lista todas as sessões locais dos CLIs de agente, deixa a pessoa escolher quais quer e grava essas threads no banco do T3 Code, com histórico completo e retomáveis pelo provider original.</p>
+
+  <h2>Context</h2>
+  <ul>
+    <li>O T3 Code já tem um importador (<code>apps/server/src/project/AgentSessionScanner.ts</code> + <code>AgentSessionImporter.ts</code>, RPCs <code>agentSessionsScan</code>/<code>agentSessionsImport</code>), mas: só Claude e Codex; importa <em>todas</em> as threads recentes de uma pasta de uma vez (sem escolha); janela de 30 dias; máx. 100 transcripts por import e 200 mensagens por thread (constantes fixas no servidor, linhas 62–96).</li>
+    <li>Quem migra trabalho para o T3 quer o histórico inteiro — senão começa do zero. Limites não são aceitáveis.</li>
+    <li><strong>Patch upstream está descartado.</strong> Decisão: gravar direto no <code>statev2.sqlite</code> com o T3 fechado, protegido por validação de schema que trava e manda a pessoa abrir issue no GitHub se algo divergir.</li>
+  </ul>
+
+  <h3>Como o T3 guarda uma thread importada (orchestration-v2)</h3>
+  <ul>
+    <li>Log de eventos unificado: tabela <code>orchestration_events</code>, linhas com <code>application_event_version = 2</code>, <code>aggregate_kind = 'thread'</code>, <code>stream_id = threadId</code>.</li>
+    <li>O importador nativo emite 4 tipos: <code>thread.created</code> → (<code>message.updated</code> + <code>turn-item.updated</code>) por mensagem → <code>provider-thread.updated</code>. Id determinístico <code>import:&lt;providerInstanceId&gt;:&lt;sessionId&gt;</code>, <code>historyOrigin: "v1_import"</code>.</li>
+    <li>O <code>EventSink</code> grava evento + projeção + <code>orchestration_v2_projection_metadata.last_sequence</code> na mesma transação. Tabelas afetadas: <code>projection_threads</code>, <code>projection_messages</code>, <code>projection_turn_items</code>, <code>turn_item_positions</code>, <code>projection_provider_threads</code>; mais um upsert em <code>provider_session_runtime</code> (resumeCursor).</li>
+    <li><strong>Não há rebuild automático no boot.</strong> <code>ProjectionMaintenance.verify/rebuild</code> existe mas só é chamado em testes. Logo, o app precisa escrever eventos <em>e</em> projeções, coerentes, e avançar <code>last_sequence</code>.</li>
+    <li>O resume é genérico: o orchestrator retoma pelo <code>providerThread.nativeThreadRef.nativeId</code> — Claude <code>--resume</code>, Codex thread id, Grok via ACP <code>session/load</code>, OpenCode <code>sessionID</code>. Estender para Grok/OpenCode é só escrever o leitor de transcript.</li>
+    <li>Projetos: <code>t3 project add &lt;path&gt;</code> já funciona offline (escreve via <code>ProjectService</code> quando não há servidor vivo). Usamos o caminho oficial, sem replicar eventos de projeto.</li>
+  </ul>
+
+  <h2>Approach</h2>
+  <p>Rust, binário único por plataforma (macOS arm64/x64, Linux x64/arm64 musl, Windows x64), <code>rusqlite</code> com SQLite embutido, TUI em <code>ratatui</code>. O app tem três camadas: <strong>scanners</strong> (um por CLI, saída normalizada), <strong>picker</strong> (TUI) e <strong>writer</strong> (guarda de schema + transação SQLite que replica exatamente o que o importador nativo faria, sem limites).</p>
+  <p>A regra de ouro do writer: <em>só escrevemos formatos que validamos</em>. Antes de qualquer escrita, calculamos um fingerprint do banco e comparamos com fingerprints conhecidos; diferença = trava com mensagem e link pré-preenchido de issue. Rejeitado: escrever só eventos e esperar rebuild (não existe no boot); RPC nativa (limites fixos); patch upstream (decisão do Paulo).</p>
+
+  <h2>Steps</h2>
+
+  <div class="card">
+    <h3>1. Esqueleto + modelo normalizado</h3>
+    <ul>
+      <li>Crate <code>t3-import</code> (bin) com módulos <code>scan/</code>, <code>t3db/</code>, <code>tui/</code>.</li>
+      <li>Tipo comum <code>SessionSummary { provider, session_id, cwd, title, created_at, updated_at, message_count, source_path }</code> e <code>Transcript { messages: Vec&lt;Msg { role, text, created_at }&gt;, model }</code> (carregado sob demanda).</li>
+      <li>CLI não-interativa também: <code>t3-import list --json</code>, <code>t3-import import &lt;ids…&gt;</code> — facilita teste e automação.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>2. Scanners (sem limites)</h3>
+    <ul>
+      <li><strong>Claude</strong>: <code>~/.claude/projects/*/*.jsonl</code> (respeitar <code>CLAUDE_CONFIG_DIR</code>). Portar as regras de parsing do <code>AgentSessionScanner.ts</code> (filtra sidechain/meta, extrai texto de blocos, cwd do record, título do summary ou primeira msg). Só ids UUID são retomáveis (mesma regra do nativo).</li>
+      <li><strong>Codex</strong>: <code>~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl</code> + <code>archived_sessions</code> (respeitar <code>CODEX_HOME</code>); <code>session_meta</code> dá id e cwd.</li>
+      <li><strong>Grok</strong>: <code>~/.grok/sessions/&lt;cwd url-encoded&gt;/</code> — formato a mapear no passo (ver Open questions).</li>
+      <li><strong>OpenCode</strong>: <code>opencode.db</code> (SQLite, aberto <code>?mode=ro</code>), tabelas de session/message/part.</li>
+      <li>Varredura rápida: só metadados na listagem; transcript completo só para as escolhidas. Paralelo com <code>rayon</code>.</li>
+      <li>Fixtures reais anonimizadas por provider em <code>tests/fixtures/</code>.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>3. Guarda de compatibilidade (fail-closed, sem amarrar versão)</h3>
+    <ul>
+      <li><strong>Não travamos por versão do T3</strong> — o nightly sai várias vezes ao dia. A guarda olha só o que importa: as tabelas que vamos tocar e os dados que já estão nelas.</li>
+      <li><strong>Estrutura:</strong> SQL completo em <code>sqlite_master</code> (colunas, tipos, NOT NULL, defaults, PK/UNIQUE, índices, triggers) das 8 tabelas, normalizado e comparado com o conjunto aceito em <code>known_schemas.toml</code>; mais <code>schema_version</code> da projeção (hoje 2). Migrations que não mexem nessas tabelas não importam.</li>
+      <li><strong>Formato dos dados (pega o que a DDL não pega):</strong> lê uma amostra recente e grande de linhas existentes de cada tabela (payload de thread, mensagem, turn item <code>user_message</code>/<code>assistant_message</code>, provider-thread, <code>metadata_json</code> de eventos, <code>resumeCursor</code>) e valida contra os modelos do t3-import em modo estrito: chave desconhecida, chave obrigatória ausente ou tipo diferente → trava. Assim, se o T3 adicionar um campo ao payload de thread, a gente percebe pela primeira thread nova que ele gravar.</li>
+      <li>Banco vazio (sem amostras) → só a checagem estrutural vale, e o app avisa isso.</li>
+      <li><strong>Pós-escrita:</strong> dentro da mesma transação, relê o que gravou e passa pelo mesmo validador antes do commit.</li>
+      <li>Divergência → aborta sem tocar em nada, mostra o diff (tabela/coluna ou campo de payload) e um link <code>github.com/&lt;repo&gt;/issues/new?…</code> pré-preenchido com versão do T3, diff e fingerprint (sem conteúdo de threads).</li>
+    </ul>
+    <h3>3b. Janela de manutenção (T3 fechado de verdade)</h3>
+    <ul>
+      <li>Resolver <em>um</em> <code>T3CODE_HOME</code> canônico e usá-lo em tudo (inclusive na CLI <code>t3</code>, via <code>--base-dir</code>).</li>
+      <li>Antes de cada etapa: <code>server-runtime.json</code> daquele home sem processo vivo; detectar o serviço em background (<code>t3 service</code>) e o app desktop, e pedir para parar (auto-restart incluso). Explicar que lock do SQLite só serializa escrita, não garante que o T3 está fechado.</li>
+      <li>Escrita das threads numa <strong>única</strong> transação <code>BEGIN IMMEDIATE</code>: revalida guarda e runtime dentro dela, escreve tudo, commit. Nada de lock liberado entre threads.</li>
+    </ul></div>
+
+  <div class="card">
+    <h3>4. Writer</h3>
+    <ul>
+      <li><strong>Ordem:</strong> guarda → backup (SQLite online backup → <code>statev2.sqlite.bak-t3import-&lt;timestamp&gt;</code>) → criação de projetos → <em>revalidar a guarda</em> → transação das threads. Dry-run nunca cria projeto nem escreve.</li>
+      <li><strong>Projetos:</strong> <code>t3 project add &lt;cwd&gt; --base-dir &lt;home&gt;</code> usando a CLI <em>do mesmo build</em> do T3 (o wrapper do app), fora da transação Rust. A CLI offline roda migrations, por isso o backup vem antes e a revalidação depois.</li>
+      <li><strong>Escrita (8 tabelas, nenhuma outra):</strong> <code>orchestration_events</code>, <code>orchestration_v2_projection_{threads,messages,turn_items,provider_threads}</code>, <code>orchestration_v2_turn_item_positions</code>, <code>provider_session_runtime</code>, <code>orchestration_v2_projection_metadata</code>. Sem command receipts, outbox, runs, nodes ou bindings de sessão (o nativo também não grava). Nunca as tabelas legadas <code>projection_*</code>.</li>
+      <li><strong>Encoding de evento (espelha <code>OrchestrationEventStore.ts:437</code>):</strong> <code>application_event_version=2</code>, <code>aggregate_kind='thread'</code>, <code>stream_version</code> começando em 0 por stream, <code>actor_kind='server'</code> (inclusive mensagens de usuário), <code>command_id/causation/correlation = NULL</code>, <code>payload_json</code> só com o payload codificado, envelope (driver, provider instance) em <code>metadata_json</code>. <code>sequence</code> alocado pelo AUTOINCREMENT; <code>last_sequence</code> = sequence do último evento de thread v2 commitado.</li>
+      <li><strong>Ordinais:</strong> replicar a normalização do <code>EventSink.ts:309</code> (itens sem run ficam abaixo de <code>1_000_000</code>, <code>TurnItemPositionStore.ts:58</code>). Thread que passe desse limite → erro explícito, nunca truncar em silêncio.</li>
+      <li><strong>Ids:</strong> app thread <code>import:&lt;instance&gt;:&lt;sessionId&gt;</code>; provider-thread id <em>qualificado por instância</em> (<code>IdAllocator.ts:216</code>). Se o provider-thread id já pertence a outra thread → recusa.</li>
+      <li><strong>Runtime:</strong> <code>provider_session_runtime</code> com <code>resumeCursor</code> como o nativo; <code>providerSessionId = null</code> (é a sessão de runtime do T3, não a conversa nativa). Para Claude/Codex, gravar também <code>importedTranscripts</code> como o <code>recordImportedTranscript</code> nativo (o scanner nativo deduplica por isso). Grok/OpenCode não cabem nesse schema → proveniência num manifesto próprio do t3-import, fora do banco do T3.</li>
+      <li><strong>Reimportação:</strong> v1 pula thread que já existe. “Atualizar com mensagens novas” vai para a fase 2 e exige manifesto com id estável e hash de cada mensagem de origem, prefixo verificado idêntico, ids de evento novos e timestamps da thread atualizados de forma coerente (<code>ProjectionStore.ts:2634</code>).</li>
+      <li>Teto de mensagens configurável na UI; padrão <strong>todas</strong>.</li>
+    </ul></div>
+
+  <div class="card">
+    <h3>5. Oráculo de compatibilidade (dev/CI)</h3>
+    <ul>
+      <li>Harness TypeScript em <code>oracle/</code> rodando contra um checkout do t3code (main/nightly).</li>
+      <li><strong>Referência:</strong> o mesmo transcript normalizado é escrito pelo caminho real do T3 (<code>EventSink.write</code> + bookkeeping de runtime/<code>importedTranscripts</code>) num banco migrado. <strong>Candidato:</strong> o Rust escreve no mesmo estado inicial. Compara as 8 tabelas coluna a coluna (JSON canônico).</li>
+      <li>Lê os eventos gravados pelo Rust de volta via <code>OrchestrationEventStore</code> (decode completo contra os contracts) e verifica que as projeções são o que <code>apply</code> produziria.</li>
+      <li>Cenários: banco vazio, banco populado, import repetido, thread grande, colisão de provider-thread id. <code>ProjectionMaintenance.verify</code> como checagem extra (não substitui o diff).</li>
+      <li>O oráculo não é um portão de runtime: é aviso antecipado. Job agendado contra o <code>main</code>/nightly roda o diff; se passar e a DDL ou o formato de payload mudou, gera a atualização de <code>known_schemas.toml</code> e dos modelos para revisão; se falhar, abre issue no repo do t3-import.</li>
+    </ul></div>
+
+  <div class="card">
+    <h3>6. TUI</h3>
+    <ul>
+      <li>Lista agrupada por pasta (projeto), com provider, título, data, nº de mensagens, e um marcador “já no T3”.</li>
+      <li>Filtros: provider, busca por texto, intervalo de datas; seleção múltipla por item e por grupo.</li>
+      <li>Painel de opções: teto de mensagens (padrão: todas), dry-run.</li>
+      <li>Tela de confirmação: projetos que serão criados, threads, backup; depois progresso e resumo.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>7. Distribuição</h3>
+    <ul>
+      <li><code>cargo-dist</code> → GitHub Releases com binários para as 5 targets + instalador shell/PowerShell.</li>
+      <li>README com o aviso: feche o T3 antes; o app faz backup; se travar por schema, abra issue.</li>
+    </ul>
+  </div>
+
+  <h2>Files touched</h2>
+  <table>
+    <thead><tr><th>File</th><th>Change</th></tr></thead>
+    <tbody>
+      <tr><td><code>src/scan/{claude,codex,grok,opencode}.rs</code></td><td>Leitores por provider → <code>SessionSummary</code>/<code>Transcript</code>.</td></tr>
+      <tr><td><code>src/t3db/guard.rs</code></td><td>Pré-condições, fingerprint, comparação, mensagem de issue.</td></tr>
+      <tr><td><code>src/t3db/model.rs</code></td><td>Structs serde espelhando os Schemas v2 do T3.</td></tr>
+      <tr><td><code>src/t3db/writer.rs</code></td><td>Backup, transação, eventos + projeções + runtime + metadata.</td></tr>
+      <tr><td><code>src/t3db/projects.rs</code></td><td>Lookup de projetos e chamada a <code>t3 project add</code>.</td></tr>
+      <tr><td><code>src/tui/</code></td><td>Picker, filtros, opções, confirmação.</td></tr>
+      <tr><td><code>known_schemas.toml</code></td><td>Fingerprints validados por versão do T3.</td></tr>
+      <tr><td><code>oracle/</code></td><td>Harness TS que compara contra o <code>ProjectionStore</code> real.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Verification</h2>
+  <ul>
+    <li>Testes unitários dos scanners com fixtures de cada provider.</li>
+    <li>Oráculo: eventos do Rust → projeção real do T3 → diff vazio; <code>verify</code> = valid.</li>
+    <li>Ponta a ponta numa cópia do <code>statev2.sqlite</code> real: importar uma thread de cada provider, abrir o T3 apontando para a cópia (<code>--base-dir</code>), ver a thread no sidebar com histórico completo, mandar uma mensagem e confirmar que o <code>nativeThreadRef.nativeId</code> continua o mesmo depois do primeiro turno (o T3 pode, em falha de resume, abrir sessão nova e fazer handoff do histórico — <code>ProviderTurnStartService.ts:694</code> — então “respondeu” não prova nada). Um provider por vez: Claude, Codex, Grok (ACP load/resume depende de capability), OpenCode 1 e 2 (<code>session.get</code>).</li>
+    <li>Rodar duas vezes: a segunda não duplica nada.</li>
+    <li>Banco com uma coluna/índice alterado, e banco com um payload de thread contendo um campo desconhecido: em ambos o app trava com a mensagem de issue e não escreve nada.</li>
+    <li>T3 aberto ou serviço ativo durante o import: app recusa antes de criar projeto.</li>
+  </ul>
+
+  <h2>Risks &amp; open questions</h2>
+  <ul>
+    <li><strong>Risk — deriva de schema:</strong> o Nightly muda quase todo dia. Mitigação: guarda fail-closed (estrutura das tabelas + formato dos dados existentes) + oráculo no CI; esperar travas frequentes e um fluxo rápido para validar e liberar cada nightly novo.</li>
+    <li><strong>Risk — projeção divergente silenciosa:</strong> uma coluna derivada ou um efeito colateral do <code>apply</code> que não replicamos. Mitigação: o oráculo compara todas as linhas de todas as tabelas, não só as que achamos que mudam.</li>
+    <li><strong>Risk — corromper o banco do usuário:</strong> backup obrigatório antes, transação por thread, nunca com T3 aberto.</li>
+    <li><strong>Risk — threads gigantes:</strong> um ano de histórico = dezenas de milhares de eventos. É o que o T3 faria nativamente; o teto configurável existe para quem quiser.</li>
+    <li><strong>Open — tool calls:</strong> v1 importa texto de usuário e assistente (igual ao nativo). Importar tool calls como turn items (<code>command_execution</code>, <code>file_change</code>…) dá um histórico mais fiel, mas multiplica o mapeamento por provider. Proposta: fase 2, atrás de uma opção.</li>
+    <li><strong>Open — formato do Grok:</strong> mapear a estrutura de <code>~/.grok/sessions</code> e confirmar que o id da sessão é o mesmo que o ACP <code>session/load</code> aceita.</li>
+    <li><strong>Open — providerInstanceId:</strong> usar a instância padrão de cada driver nas settings do T3 (<code>settings.json</code>); se o usuário tiver várias, perguntar na UI.</li>
+    <li><strong>Decisão — sessões de worktree:</strong> o cwd de execução no v2 vem de <code>thread.worktreePath</code> ou da raiz do projeto (<code>RuntimePolicy.ts:106</code>), e o OpenCode 2 move a sessão se o cwd divergir. Então: se o cwd é um git worktree de um repo que já é (ou vai virar) projeto, a thread vai para esse projeto <em>com</em> <code>worktreePath</code> = cwd original e <code>branch</code> = branch atual do worktree. Se o worktree não existe mais, a thread é importada como só-leitura de fato (histórico) e a UI avisa que retomar vai rodar na raiz do repo.</li>
+    <li><strong>Limite real:</strong> “histórico completo” = texto completo; mensagens importadas não têm checkpoints nem fork por run (<code>MessagesTimeline.tsx:2812</code>), igual ao import nativo.</li>
+  </ul>
+
+  <footer>plans.paulo.dev</footer>
+</main>
+</body>
+</html>
