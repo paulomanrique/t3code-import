@@ -1,0 +1,8 @@
+{"type": "system", "content": "system prompt"}
+{"type": "user", "content": "<user_info>OS: dummy</user_info>"}
+{"type": "user", "synthetic_reason": "project_instructions", "content": "<system-reminder>follow the project</system-reminder>"}
+{"type": "reasoning", "content": "hidden reasoning"}
+{"type": "user", "content": "<user_query>\nPlease rename the button\n</user_query>"}
+{"type": "assistant", "content": "", "tool_calls": [{"name": "edit"}]}
+{"type": "tool_result", "content": "edited"}
+{"type": "assistant", "content": "Renamed it.", "model_id": "grok-4.6"}

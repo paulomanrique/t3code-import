@@ -1,0 +1,4 @@
+{"type":"session_meta","timestamp":"2026-08-21T09:00:00Z","payload":{"id":"66666666-6666-4666-8666-666666666666","cwd":"/tmp/fork"}}
+{"type":"session_meta","timestamp":"2026-08-21T09:00:01Z","payload":{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","cwd":"/tmp/parent"}}
+{"type":"event_msg","timestamp":"2026-08-21T09:00:02Z","payload":{"type":"user_message","message":"Continue in the fork"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Continuing."}]}}

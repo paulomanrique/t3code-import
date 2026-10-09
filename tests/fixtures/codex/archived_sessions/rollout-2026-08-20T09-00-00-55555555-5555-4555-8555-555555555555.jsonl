@@ -1,0 +1,3 @@
+{"type":"session_meta","timestamp":"2026-08-20T09:00:00Z","payload":{"id":"55555555-5555-4555-8555-555555555555","cwd":"/tmp/archived"}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":"<environment_context>\n<cwd>/tmp/archived</cwd>\n</environment_context>"}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Initialize Git and add a README."}]}}
