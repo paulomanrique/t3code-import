@@ -4,6 +4,7 @@ mod claude;
 mod codex;
 mod grok;
 mod opencode;
+mod util;
 
 use std::path::PathBuf;
 
@@ -51,5 +52,8 @@ pub fn scanners(roots: &Roots) -> Vec<Box<dyn Scanner>> {
 }
 
 pub fn scanner_for(roots: &Roots, provider: Provider) -> Box<dyn Scanner> {
-    scanners(roots).into_iter().find(|s| s.provider() == provider).expect("every provider has a scanner")
+    scanners(roots)
+        .into_iter()
+        .find(|s| s.provider() == provider)
+        .expect("every provider has a scanner")
 }

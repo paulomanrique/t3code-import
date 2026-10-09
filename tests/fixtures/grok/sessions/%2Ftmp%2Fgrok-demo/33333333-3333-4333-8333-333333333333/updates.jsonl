@@ -1,0 +1,8 @@
+{"timestamp":1780000000,"method":"session/update","params":{"sessionId":"33333333-3333-4333-8333-333333333333","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"Fix the widget"}}}}
+{"timestamp":1780000001,"method":"session/update","params":{"sessionId":"33333333-3333-4333-8333-333333333333","update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"planning the widget change"}}}}
+{"timestamp":1780000002,"method":"session/update","params":{"sessionId":"33333333-3333-4333-8333-333333333333","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"I updated the widget."}}}}
+{"timestamp":1780000003,"method":"session/update","params":{"sessionId":"33333333-3333-4333-8333-333333333333","update":{"sessionUpdate":"tool_call"}}}
+{"timestamp":1780000004,"method":"session/update","params":{"sessionId":"33333333-3333-4333-8333-333333333333","update":{"sessionUpdate":"tool_call_update"}}}
+{"timestamp":1780000005,"method":"session/update","params":{"sessionId":"33333333-3333-4333-8333-333333333333","update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"checking the result"}}}}
+{"timestamp":1780000006,"method":"session/update","params":{"sessionId":"33333333-3333-4333-8333-333333333333","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Done."}}}}
+{"timestamp":1780000007,"method":"session/update","params":{"sessionId":"33333333-3333-4333-8333-333333333333","update":{"sessionUpdate":"turn_completed"}}}

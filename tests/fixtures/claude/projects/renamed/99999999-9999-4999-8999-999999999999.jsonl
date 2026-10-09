@@ -1,0 +1,3 @@
+{"type": "ai-title", "aiTitle": "Generated name", "timestamp": "2026-08-24T12:00:00.000Z"}
+{"type": "custom-title", "customTitle": "Manual name", "timestamp": "2026-08-24T12:00:01.000Z"}
+{"type": "user", "cwd": "/tmp/renamed", "timestamp": "2026-08-24T12:00:02.000Z", "message": {"role": "user", "content": "please rename this session"}}

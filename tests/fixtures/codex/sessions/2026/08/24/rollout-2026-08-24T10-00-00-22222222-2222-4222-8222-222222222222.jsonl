@@ -1,0 +1,13 @@
+{"type":"session_meta","timestamp":"2026-08-24T10:00:00Z","payload":{"id":"22222222-2222-4222-8222-222222222222","session_id":"22222222-2222-4222-8222-222222222222","cwd":"/tmp/codex-demo","base_instructions":"You are a coding agent."}}
+{"type":"turn_context","timestamp":"2026-08-24T10:00:00Z","payload":{"model":"gpt-6.1-sol","cwd":"/tmp/codex-demo"}}
+{"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"developer instructions that must be dropped"}]}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<user_instructions>\nDo not mention this.\n</user_instructions>"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-1"}}}
+{"type":"event_msg","timestamp":"2026-08-24T10:00:02Z","payload":{"type":"user_message","message":"Fix the actual bug"}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Fix the actual bug"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-1"}}}
+{"type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"hidden reasoning"}]}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Fixed"}]}}
+{"type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{}"}}
+{"type":"turn_context","timestamp":"2026-08-24T10:01:00Z","payload":{"model":"gpt-later","cwd":"/tmp/codex-demo"}}
+{"type":"event_msg","timestamp":"2026-08-24T10:01:01Z","payload":{"type":"user_message","message":"Second prompt"}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Second prompt"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-2"}}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Second reply"}]}}

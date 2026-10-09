@@ -1,0 +1,2 @@
+{"type": "user", "content": "<user_query>decoy from chat history</user_query>"}
+{"type": "assistant", "content": "decoy reply", "model_id": "grok-decoy"}

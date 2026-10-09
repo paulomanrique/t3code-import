@@ -1,0 +1,12 @@
+{
+  "id": "ses_legacy",
+  "slug": "legacy",
+  "version": "1.1.0",
+  "projectID": "proj",
+  "directory": "/tmp/opencode-legacy",
+  "title": "Legacy storage session",
+  "time": {
+    "created": 1700000005000,
+    "updated": 1700000006000
+  }
+}

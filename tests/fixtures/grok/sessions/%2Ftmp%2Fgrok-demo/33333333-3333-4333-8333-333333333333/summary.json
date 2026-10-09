@@ -1,0 +1,13 @@
+{
+  "info": {
+    "id": "33333333-3333-4333-8333-333333333333",
+    "cwd": "/tmp/grok-demo"
+  },
+  "generated_title": "Fix the widget",
+  "session_summary": "A longer summary that must not replace the title",
+  "current_model_id": "grok-4.6",
+  "created_at": "2026-08-24T10:00:00.000000Z",
+  "updated_at": "2026-08-24T10:05:00.000000Z",
+  "num_messages": 9,
+  "num_chat_messages": 4
+}
