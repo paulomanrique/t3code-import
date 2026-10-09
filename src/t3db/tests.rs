@@ -10,9 +10,7 @@ fn database_copy() -> anyhow::Result<Option<(tempfile::TempDir, T3Home)>> {
         .map(|p| p.join(".t3/userdata/statev2.sqlite"))
         .filter(|p| p.is_file())
     else {
-        eprintln!(
-            "skipping real-database compatibility test: ~/.t3/userdata/statev2.sqlite absent"
-        );
+        no_database()?;
         return Ok(None);
     };
     let dir = tempfile::tempdir()?;
@@ -25,6 +23,14 @@ fn database_copy() -> anyhow::Result<Option<(tempfile::TempDir, T3Home)>> {
     source.execute_batch("ROLLBACK")?;
     let home = T3Home::detect(Some(dir.path().into()))?;
     Ok(Some((dir, home)))
+}
+fn no_database() -> anyhow::Result<()> {
+    eprintln!("SKIP: no T3 database");
+    anyhow::ensure!(
+        std::env::var("T3IMPORT_REQUIRE_DB").as_deref() != Ok("1"),
+        "T3IMPORT_REQUIRE_DB=1 but no T3 database"
+    );
+    Ok(())
 }
 struct ClosedInventory;
 impl ClosedInventory {
@@ -125,7 +131,8 @@ fn imports_match_native_rows_and_reimport_skips() -> anyhow::Result<()> {
         Provider::Claude,
         "a8a31111-1111-4111-8111-111111111111",
     )?;
-    let grok = request(&home, Provider::Grok, "synthetic:grok/session")?;
+    let mut grok = request(&home, Provider::Grok, "synthetic:grok/session")?;
+    grok.transcript.summary.model = Some("  test-model  ".into());
     let requests = vec![claude.clone(), grok.clone()];
     let db = guard::readonly(&home)?;
     // A V1-only history for this ID must not force V2 stream_version back to zero.
@@ -151,6 +158,32 @@ fn imports_match_native_rows_and_reimport_skips() -> anyhow::Result<()> {
             &request.provider_instance_id,
             &request.transcript.summary.session_id,
         );
+        let expected_provider = match request.transcript.summary.provider {
+            Provider::Claude => {
+                "provider-thread:provider:claudeAgent:provider-instance:claudeAgent:native-thread:a8a31111-1111-4111-8111-111111111111"
+            }
+            Provider::Grok => {
+                "provider-thread:provider:grok:provider-instance:grok:native-thread:synthetic%3Agrok%2Fsession"
+            }
+            _ => unreachable!(),
+        };
+        let provider_id: String = db.query_row("SELECT provider_thread_id FROM orchestration_v2_projection_provider_threads WHERE thread_id=?", [&id], |r| r.get(0))?;
+        assert_eq!(provider_id, expected_provider);
+        let active: String = db.query_row("SELECT active_provider_thread_id FROM orchestration_v2_projection_threads WHERE thread_id=?", [&id], |r| r.get(0))?;
+        assert_eq!(active, expected_provider);
+        let branch: Option<String> = db.query_row("SELECT json_extract(payload_json,'$.branch') FROM orchestration_v2_projection_threads WHERE thread_id=?", [&id], |r| r.get(0))?;
+        assert_eq!(branch, None);
+        let raw: String = db.query_row(
+            "SELECT payload_json FROM orchestration_v2_projection_threads WHERE thread_id=?",
+            [&id],
+            |r| r.get(0),
+        )?;
+        let mut payload: Value = serde_json::from_str(&raw)?;
+        assert_eq!(payload["modelSelection"]["model"], "test-model");
+        for invalid in ["", "   ", " untrimmed", "untrimmed "] {
+            payload["modelSelection"]["model"] = json!(invalid);
+            assert!(guard::validate("thread", &serde_json::to_string(&payload)?).is_err());
+        }
         assert_native_shapes(&db, &id)?;
         let versions: Vec<i64> = db.prepare("SELECT stream_version FROM orchestration_events WHERE stream_id=? AND application_event_version=2 ORDER BY sequence")?.query_map([&id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
         let start = if request.transcript.summary.provider == Provider::Claude {
@@ -356,6 +389,17 @@ fn structure_and_payload_drift_fail_closed() -> anyhow::Result<()> {
         "ALTER TABLE orchestration_v2_projection_messages DROP COLUMN surprise",
         [],
     )?;
+    db.execute(
+        "CREATE INDEX synthetic_drift_index ON orchestration_v2_projection_messages(role)",
+        [],
+    )?;
+    assert!(
+        check(&home)?
+            .findings
+            .iter()
+            .any(|f| f.location == "sqlite_master.synthetic_drift_index")
+    );
+    db.execute("DROP INDEX synthetic_drift_index", [])?;
     db.execute("UPDATE orchestration_v2_projection_threads SET updated_at='2099-01-01T00:00:00.000Z',payload_json=json_set(payload_json,'$.unexpectedFutureKey','PRIVATE-THREAD-CONTENT') WHERE thread_id=(SELECT thread_id FROM orchestration_v2_projection_threads LIMIT 1)",[])?;
     let report = check(&home)?;
     assert!(!report.ok());
@@ -377,6 +421,8 @@ fn dry_run_does_not_write_and_limit_keeps_newest() -> anyhow::Result<()> {
     let mut request = request(&home, Provider::Grok, "dry-run")?;
     let before = std::fs::read(home.db_path())?;
     request.placement.workspace_root = home.base.join("missing-project");
+    std::fs::create_dir(&request.placement.workspace_root)?;
+    guard::TEST_PROCESSES.with(|v| *v.borrow_mut() = Some(vec!["PID 123: T3 service".into()]));
     let report = import(
         &home,
         vec![request.clone()],
@@ -387,6 +433,8 @@ fn dry_run_does_not_write_and_limit_keeps_newest() -> anyhow::Result<()> {
         &mut |_| {},
     )?;
     assert_eq!(report.imported.len(), 1);
+    assert!(report.warnings.iter().any(|w| w.contains("T3 running")));
+    guard::TEST_PROCESSES.with(|v| *v.borrow_mut() = Some(vec![]));
     assert_eq!(std::fs::read(home.db_path())?, before);
     assert_eq!(std::fs::read_dir(home.userdata())?.count(), 1);
     request.placement.workspace_root = snapshot(&home)?.projects[0].workspace_root.clone();
@@ -453,6 +501,7 @@ fn readonly_contract_diagnostics() -> anyhow::Result<()> {
         .map(|p| p.join(".t3"))
         .filter(|p| p.join("userdata/statev2.sqlite").is_file())
     else {
+        no_database()?;
         return Ok(());
     };
     let home = T3Home { base };
@@ -513,10 +562,7 @@ fn assert_sql_row_shape(
         .contains(&column.as_str())
             && column != key
         {
-            // Imported provider-thread identity itself varies; message item bindings stay null.
-            if column != "provider_thread_id" || table.ends_with("turn_items") {
-                assert_eq!(actual, native, "{table}.{column}");
-            }
+            assert_eq!(actual, native, "{table}.{column}");
         }
     }
     Ok(())
@@ -572,5 +618,166 @@ fn running_process_refuses_before_backup() -> anyhow::Result<()> {
     guard::TEST_PROCESSES.with(|v| *v.borrow_mut() = Some(vec!["PID 123: T3 service".into()]));
     assert!(import(&home, vec![request], &ImportOptions::default(), &mut |_| {}).is_err());
     assert_eq!(std::fs::read_dir(home.userdata())?.count(), 1);
+    Ok(())
+}
+
+#[test]
+fn missing_worktree_requires_registered_owner() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let main = temp.path().join("main");
+    let cwd = main.join("gone");
+    let admin = main.join(".git/worktrees/gone");
+    std::fs::create_dir_all(&admin)?;
+    std::fs::write(main.join(".git/HEAD"), "ref: refs/heads/unrelated\n")?;
+    let unowned = resolve_placement(&cwd);
+    assert!(unowned.worktree_missing);
+    assert_eq!(unowned.worktree_path, None);
+    assert_eq!(unowned.branch, None);
+    std::fs::write(
+        admin.join("gitdir"),
+        format!("{}\n", cwd.join(".git").display()),
+    )?;
+    std::fs::write(admin.join("HEAD"), "ref: refs/heads/deleted-worktree\n")?;
+    let owned = resolve_placement(&cwd);
+    assert_eq!(owned.workspace_root, main);
+    assert_eq!(owned.worktree_path, Some(cwd.clone()));
+    assert_eq!(owned.branch.as_deref(), Some("deleted-worktree"));
+    assert!(owned.worktree_missing);
+    std::fs::remove_file(admin.join("HEAD"))?;
+    assert_eq!(resolve_placement(&cwd).branch, None);
+    assert_eq!(resolve_placement(&main).branch, None);
+    Ok(())
+}
+
+#[test]
+fn missing_unowned_folder_skips_without_project_add() -> anyhow::Result<()> {
+    let _closed = ClosedInventory::new();
+    let Some((_dir, home)) = database_copy()? else {
+        return Ok(());
+    };
+    let mut req = request(&home, Provider::Grok, "gone-folder")?;
+    req.transcript.summary.cwd = home.base.join("gone");
+    req.placement = resolve_placement(&req.transcript.summary.cwd);
+    let before = std::fs::read(home.db_path())?;
+    let report = import(&home, vec![req], &ImportOptions::default(), &mut |p| {
+        assert!(!matches!(p, Progress::CreatingProject(_)));
+    })?;
+    assert_eq!(
+        report.skipped[0].1,
+        format!(
+            "folder no longer exists: {}",
+            home.base.join("gone").display()
+        )
+    );
+    assert!(report.backup.is_none());
+    assert_eq!(std::fs::read(home.db_path())?, before);
+    Ok(())
+}
+
+#[test]
+fn native_session_started_by_t3_is_skipped() -> anyhow::Result<()> {
+    let _closed = ClosedInventory::new();
+    let Some((_dir, home)) = database_copy()? else {
+        return Ok(());
+    };
+    let db = Connection::open(home.db_path())?;
+    let (provider_id, raw): (String, String) = db.query_row("SELECT provider_thread_id,payload_json FROM orchestration_v2_projection_provider_threads WHERE thread_id IS NOT NULL LIMIT 1", [], |r| Ok((r.get(0)?,r.get(1)?)))?;
+    let mut payload: Value = serde_json::from_str(&raw)?;
+    payload["nativeThreadRef"] =
+        json!({"driver":"grok","nativeId":"native-t3-session","strength":"strong"});
+    db.execute("UPDATE orchestration_v2_projection_provider_threads SET payload_json=? WHERE provider_thread_id=?", params![serde_json::to_string(&payload)?,provider_id])?;
+    let owner: String = db.query_row("SELECT thread_id FROM orchestration_v2_projection_provider_threads WHERE provider_thread_id=?", [&provider_id], |r| r.get(0))?;
+    let snap = snapshot(&home)?;
+    assert!(snap.has_native(Provider::Grok, "native-t3-session"));
+    assert!(!snap.has_native(Provider::Codex, "native-t3-session"));
+    let req = request(&home, Provider::Grok, "native-t3-session")?;
+    let before: i64 = db.query_row("SELECT count(*) FROM orchestration_events", [], |r| {
+        r.get(0)
+    })?;
+    let report = import(&home, vec![req], &ImportOptions::default(), &mut |_| {})?;
+    assert_eq!(
+        report.skipped[0].1,
+        format!("already in T3 as thread {owner}")
+    );
+    assert!(report.imported.is_empty());
+    assert!(report.backup.is_none());
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM orchestration_events", [], |r| r
+            .get::<_, i64>(0))?,
+        before
+    );
+    Ok(())
+}
+
+#[test]
+fn existing_runtime_merges_cwd_and_deduplicates_sources() -> anyhow::Result<()> {
+    let _closed = ClosedInventory::new();
+    let Some((_dir, home)) = database_copy()? else {
+        return Ok(());
+    };
+    let mut req = request(&home, Provider::Codex, "runtime-merge")?;
+    req.transcript.summary.model = Some("   ".into());
+    let id = thread_id_for("codex", "runtime-merge");
+    let source = json!({"provider":"codex","providerInstanceId":"codex","providerSessionId":"runtime-merge","filePath":req.transcript.summary.source,"size":0,"mtimeMs":null,"device":0,"inode":null,"birthtimeMs":null});
+    let other = json!({"provider":"codex","providerInstanceId":"codex","providerSessionId":"other","filePath":"/other","size":0,"mtimeMs":null,"device":0,"inode":null,"birthtimeMs":null});
+    let db = Connection::open(home.db_path())?;
+    db.execute("INSERT INTO provider_session_runtime(thread_id,provider_name,adapter_key,runtime_mode,status,last_seen_at,runtime_payload_json,provider_instance_id) VALUES (?1,'codex','codex','full-access','stopped','2026-10-01T12:00:00.000Z',?2,'codex')", params![id,serde_json::to_string(&json!({"cwd":"/old","importedTranscripts":[source,other]}))?])?;
+    let expected_cwd = snapshot(&home)?.projects[0].workspace_root.clone();
+    // Resolve through an alias, but keep the stored project's spelling in runtime.cwd.
+    #[cfg(unix)]
+    {
+        let alias = home.base.join("project-alias");
+        std::os::unix::fs::symlink(&expected_cwd, &alias)?;
+        req.placement.workspace_root = alias;
+    }
+    import(&home, vec![req], &ImportOptions::default(), &mut |_| {})?;
+    let raw: String = db.query_row(
+        "SELECT runtime_payload_json FROM provider_session_runtime WHERE thread_id=?",
+        [&id],
+        |r| r.get(0),
+    )?;
+    let runtime: Value = serde_json::from_str(&raw)?;
+    assert_eq!(runtime["cwd"], json!(expected_cwd));
+    assert_eq!(runtime["importedTranscripts"].as_array().unwrap().len(), 2);
+    let model: String = db.query_row("SELECT json_extract(payload_json,'$.modelSelection.model') FROM orchestration_v2_projection_threads WHERE thread_id=?", [&id], |r| r.get(0))?;
+    assert_eq!(model, "gpt-6-astra");
+    Ok(())
+}
+
+#[test]
+fn registered_missing_worktree_imports_under_owning_project() -> anyhow::Result<()> {
+    let _closed = ClosedInventory::new();
+    let Some((_dir, home)) = database_copy()? else {
+        return Ok(());
+    };
+    let main = home.base.join("main");
+    let cwd = main.join("gone");
+    let admin = main.join(".git/worktrees/gone");
+    std::fs::create_dir_all(&admin)?;
+    std::fs::write(
+        admin.join("gitdir"),
+        format!("{}\n", cwd.join(".git").display()),
+    )?;
+    std::fs::write(admin.join("HEAD"), "ref: refs/heads/feature/gone\n")?;
+    let project = snapshot(&home)?.projects[0].id.clone();
+    let db = Connection::open(home.db_path())?;
+    db.execute(
+        "UPDATE projection_projects SET workspace_root=? WHERE project_id=?",
+        params![main.to_string_lossy(), project],
+    )?;
+    let mut req = request(&home, Provider::Grok, "registered-gone")?;
+    req.transcript.summary.cwd = cwd.clone();
+    req.placement = resolve_placement(&cwd);
+    let report = import(&home, vec![req], &ImportOptions::default(), &mut |p| {
+        assert!(!matches!(p, Progress::CreatingProject(_)));
+    })?;
+    assert_eq!(report.imported.len(), 1);
+    assert!(report.projects_created.is_empty());
+    assert!(report.warnings.iter().any(|w| w.contains("missing")));
+    let raw: String = db.query_row("SELECT payload_json FROM orchestration_v2_projection_threads WHERE thread_id='import:grok:registered-gone'", [], |r| r.get(0))?;
+    let thread: Value = serde_json::from_str(&raw)?;
+    assert_eq!(thread["projectId"], project);
+    assert_eq!(thread["branch"], "feature/gone");
+    assert_eq!(thread["worktreePath"], json!(cwd));
     Ok(())
 }

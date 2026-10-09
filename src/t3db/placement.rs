@@ -21,6 +21,27 @@ pub fn resolve_placement(cwd: &Path) -> Placement {
         branch: None,
         worktree_missing: !cwd.exists(),
     };
+    if !cwd.exists() {
+        // Only an explicit worktree registration establishes ownership of a gone cwd.
+        for root in cwd.ancestors().filter(|p| p.is_dir()) {
+            let Ok(entries) = std::fs::read_dir(root.join(".git/worktrees")) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let admin = entry.path();
+                let Ok(target) = std::fs::read_to_string(admin.join("gitdir")) else {
+                    continue;
+                };
+                if admin.join(target.trim()) == cwd.join(".git") {
+                    placement.workspace_root = root.to_path_buf();
+                    placement.worktree_path = Some(cwd.clone());
+                    placement.branch = head_branch(&admin);
+                    return placement;
+                }
+            }
+        }
+        return placement;
+    }
     for root in cwd.ancestors() {
         let marker = root.join(".git");
         let gitdir = if marker.is_dir() {
@@ -34,9 +55,6 @@ pub fn resolve_placement(cwd: &Path) -> Placement {
             };
             root.join(path.trim())
         };
-        placement.branch = std::fs::read_to_string(gitdir.join("HEAD"))
-            .ok()
-            .and_then(|s| s.trim().strip_prefix("ref: refs/heads/").map(str::to_owned));
         if let Ok(common) = std::fs::read_to_string(gitdir.join("commondir")) {
             if let Ok(common) = gitdir.join(common.trim()).canonicalize() {
                 // A standard linked worktree shares the main repository's .git directory.
@@ -44,6 +62,7 @@ pub fn resolve_placement(cwd: &Path) -> Placement {
                     if let Some(main) = common.parent() {
                         placement.workspace_root = main.to_path_buf();
                         placement.worktree_path = Some(root.to_path_buf());
+                        placement.branch = head_branch(&gitdir);
                     }
                 }
             }
@@ -51,4 +70,10 @@ pub fn resolve_placement(cwd: &Path) -> Placement {
         break;
     }
     placement
+}
+
+fn head_branch(gitdir: &Path) -> Option<String> {
+    std::fs::read_to_string(gitdir.join("HEAD"))
+        .ok()
+        .and_then(|s| s.trim().strip_prefix("ref: refs/heads/").map(str::to_owned))
 }

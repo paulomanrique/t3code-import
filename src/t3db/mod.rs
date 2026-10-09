@@ -32,6 +32,9 @@ pub struct ProjectRef {
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
     pub projects: Vec<ProjectRef>,
+    /// Native CLI identities, including sessions started by T3 itself.
+    pub native_sessions: HashSet<(String, String)>,
+    pub native_owners: HashMap<(String, String), String>,
     /// Ids of every V2 thread already in T3 (`orchestration_v2_projection_threads`).
     pub thread_ids: HashSet<String>,
     /// Enabled provider instance ids per driver, from T3's `settings.json`.
@@ -40,6 +43,13 @@ pub struct Snapshot {
     /// Drivers switched off in T3's settings. Their threads import and show their
     /// history, but T3 can't continue them until the provider is enabled.
     pub disabled_providers: HashSet<Provider>,
+}
+
+impl Snapshot {
+    pub fn has_native(&self, provider: Provider, session_id: &str) -> bool {
+        self.native_sessions
+            .contains(&(provider.driver().into(), session_id.into()))
+    }
 }
 
 pub fn snapshot(home: &T3Home) -> anyhow::Result<Snapshot> {

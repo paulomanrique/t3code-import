@@ -3,7 +3,8 @@ use anyhow::{Context, bail};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, process::Command};
+use std::collections::BTreeMap;
+use sysinfo::{Pid, System};
 
 const GITHUB_REPO: &str = "paulomanrique/t3code-import";
 pub(super) const TABLES: [&str; 8] = [
@@ -107,15 +108,7 @@ pub(super) fn running(home: &T3Home) -> anyhow::Result<Vec<String>> {
     if let Some(inventory) = TEST_PROCESSES.with(|v| v.borrow().clone()) {
         return Ok(inventory);
     }
-    let output = Command::new("ps")
-        .args(["-axww", "-o", "pid=,command="])
-        .output()
-        .context("cannot check T3 processes with ps; refusing to write")?;
-    anyhow::ensure!(
-        output.status.success(),
-        "ps failed; cannot establish maintenance window"
-    );
-    let processes = String::from_utf8(output.stdout)?;
+    let processes = System::new_all();
     let mut found = BTreeMap::new();
     for path in [
         home.userdata().join("server-runtime.json"),
@@ -129,12 +122,12 @@ pub(super) fn running(home: &T3Home) -> anyhow::Result<Vec<String>> {
                     .get("pid")
                     .and_then(|p| p.as_u64())
                     .context("server-runtime.json missing pid")?;
-                if processes.lines().any(|l| {
-                    l.split_whitespace()
-                        .next()
-                        .and_then(|p| p.parse::<u64>().ok())
-                        == Some(pid)
-                }) {
+                if processes
+                    .process(Pid::from_u32(
+                        pid.try_into().context("invalid runtime pid")?,
+                    ))
+                    .is_some()
+                {
                     found.insert(pid, format!("PID {pid} recorded in server-runtime.json"));
                 }
             }
@@ -145,18 +138,17 @@ pub(super) fn running(home: &T3Home) -> anyhow::Result<Vec<String>> {
     let default_home = dirs::home_dir()
         .map(|p| p.join(".t3"))
         .map(|p| p.canonicalize().unwrap_or(p));
-    for line in processes.lines() {
-        let line = line.trim();
-        let Some((pid, command)) = line.split_once(char::is_whitespace) else {
-            continue;
-        };
-        let Ok(pid) = pid.parse::<u64>() else {
-            continue;
-        };
+    for (pid, process) in processes.processes() {
+        let pid = u64::from(pid.as_u32());
         if pid == u64::from(std::process::id()) {
             continue;
         }
-        if process_for_home(command.trim(), home, default_home.as_deref()) {
+        let argv: Vec<String> = process
+            .cmd()
+            .iter()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        if process_for_home(process.exe(), &argv, home, default_home.as_deref()) {
             // Do not include arbitrary command arguments in reports (they may contain secrets).
             found.entry(pid).or_insert_with(|| {
                 format!(
@@ -169,62 +161,104 @@ pub(super) fn running(home: &T3Home) -> anyhow::Result<Vec<String>> {
     Ok(found.into_values().collect())
 }
 
-fn process_for_home(command: &str, home: &T3Home, default_home: Option<&std::path::Path>) -> bool {
-    let lower = command.to_ascii_lowercase();
-    let executable = command
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    let cli = executable.ends_with("/t3") || executable == "t3";
-    let desktop = lower.starts_with("/applications/t3 code.app/")
-        || lower.starts_with("/applications/t3 code (nightly).app/")
-        || lower.starts_with("/applications/t3code.app/")
-        || executable.contains("/t3 code.app/")
+/// Custom T3CODE_HOME environments without --base-dir are detected only through
+/// server-runtime.json: process environments are not read by this inventory.
+fn process_for_home(
+    exe: Option<&std::path::Path>,
+    argv: &[String],
+    home: &T3Home,
+    default_home: Option<&std::path::Path>,
+) -> bool {
+    let executable = exe
+        .map(|p| p.to_string_lossy().into_owned())
+        .or_else(|| argv.first().cloned())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .replace('\\', "/");
+    let name = executable.rsplit(['/', '\\']).next().unwrap_or("");
+    // The installed shell launcher execs Electron with T3's bin.mjs before
+    // the user's CLI arguments. Treat that as a CLI, even though exe is the app.
+    let script = argv.iter().position(|arg| {
+        let arg = arg.to_ascii_lowercase().replace('\\', "/");
+        arg.ends_with("/apps/server/dist/bin.mjs") || arg.ends_with("/apps/server/src/bin.ts")
+    });
+    let cli = matches!(name, "t3" | "t3.exe") || script.is_some();
+    let desktop = executable.contains("/t3 code.app/")
+        || executable.contains("/t3 code (nightly).app/")
         || executable.contains("/t3code.app/")
-        || executable.ends_with("/t3-code")
-        || executable.ends_with("/t3code");
-    let server = (executable.ends_with("/node")
-        || executable.ends_with("/bun")
-        || executable.ends_with("/electron"))
-        && (lower.contains("t3code")
-            || lower.contains("t3-code")
-            || lower.contains("t3 code.app")
-            || lower.contains("/t3/"))
-        && (lower.contains("server") || lower.contains("app.asar"));
-    let non_server_cli = [
-        " project",
-        " auth",
-        " settings",
-        " config",
-        " --help",
-        " --version",
-        " service status",
-        " service uninstall",
-    ]
-    .iter()
-    .any(|word| lower.contains(word));
-    let server_executable =
-        executable.ends_with("/t3-server") || executable.ends_with("/t3code-server");
-    if !(desktop || server || server_executable || (cli && !non_server_cli)) {
+        || matches!(
+            name,
+            "t3-code"
+                | "t3code"
+                | "t3-code.exe"
+                | "t3code.exe"
+                | "t3 code.exe"
+                | "t3 code (nightly).exe"
+        );
+    let server = matches!(
+        name,
+        "node" | "bun" | "electron" | "node.exe" | "bun.exe" | "electron.exe"
+    ) && argv.iter().skip(1).any(|arg| {
+        let arg = arg.to_ascii_lowercase().replace('\\', "/");
+        (arg.contains("t3code")
+            || arg.contains("t3-code")
+            || arg.contains("t3 code.app")
+            || arg.contains("/t3 code/")
+            || arg.contains("/t3/"))
+            && (arg.contains("server") || arg.contains("app.asar"))
+    });
+    // Parse positional CLI tokens, excluding option values such as paths named "project".
+    let mut tokens = Vec::new();
+    let mut args = argv.iter().skip(script.map_or(1, |i| i + 1));
+    while let Some(arg) = args.next() {
+        if matches!(arg.as_str(), "--help" | "-h" | "--version" | "-v") && cli {
+            return false;
+        }
+        if matches!(arg.as_str(), "--base-dir" | "--host" | "--port") {
+            args.next();
+            continue;
+        }
+        if !arg.starts_with('-') {
+            tokens.push(arg.as_str());
+        }
+    }
+    let cli_server = cli
+        && match tokens.as_slice() {
+            [] | ["serve", ..] | ["server", ..] | ["start", ..] => true,
+            [
+                "service",
+                "run" | "start" | "restart" | "install" | "update",
+                ..,
+            ] => true,
+            _ => false,
+        };
+    if cli && !cli_server {
         return false;
     }
-    if let Some((_, suffix)) = command.split_once("--base-dir") {
-        let path = argument_path(suffix.trim_start_matches([' ', '=']));
-        return std::path::Path::new(path)
-            .canonicalize()
-            .unwrap_or_else(|_| path.into())
-            == home.base;
+    if !(desktop
+        || server
+        || matches!(
+            name,
+            "t3-server" | "t3code-server" | "t3-server.exe" | "t3code-server.exe"
+        )
+        || cli_server)
+    {
+        return false;
     }
-    if let Some((_, suffix)) = command.split_once("T3CODE_HOME=") {
-        let path = argument_path(suffix);
-        return std::path::Path::new(path)
-            .canonicalize()
-            .unwrap_or_else(|_| path.into())
-            == home.base;
+    for (i, arg) in argv.iter().enumerate() {
+        let path = if arg == "--base-dir" {
+            argv.get(i + 1).map(String::as_str)
+        } else {
+            arg.strip_prefix("--base-dir=")
+        };
+        if let Some(path) = path {
+            return std::path::Path::new(path)
+                .canonicalize()
+                .unwrap_or_else(|_| path.into())
+                == home.base;
+        }
     }
-    command.contains(&home.base.to_string_lossy().to_string())
-        || default_home.is_some_and(|p| p == home.base)
+    default_home.is_some_and(|p| p == home.base)
 }
 
 pub(super) fn check_connection(home: &T3Home, db: &Connection) -> anyhow::Result<GuardReport> {
@@ -307,16 +341,71 @@ pub(super) fn check_connection(home: &T3Home, db: &Connection) -> anyhow::Result
 
 fn t3_version(home: &T3Home) -> String {
     // Reading bundle metadata avoids executing the CLI during compatibility checks.
-    let mut candidates = vec![std::path::PathBuf::from(
-        "/Applications/T3 Code.app/Contents/Info.plist",
-    )];
+    let mut candidates = Vec::new();
+    let system = System::new_all();
+    let runtime_pids: Vec<u64> = [
+        home.userdata().join("server-runtime.json"),
+        home.base.join("server-runtime.json"),
+    ]
+    .iter()
+    .filter_map(|p| std::fs::read(p).ok())
+    .filter_map(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
+    .filter_map(|v| v.get("pid").and_then(|p| p.as_u64()))
+    .collect();
+    let default_home = dirs::home_dir()
+        .map(|p| p.join(".t3"))
+        .map(|p| p.canonicalize().unwrap_or(p));
+    for (pid, process) in system.processes() {
+        let argv: Vec<String> = process
+            .cmd()
+            .iter()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        if runtime_pids.contains(&u64::from(pid.as_u32()))
+            || process_for_home(process.exe(), &argv, home, default_home.as_deref())
+        {
+            if let Some(exe) = process.exe() {
+                for ancestor in exe.ancestors().collect::<Vec<_>>().into_iter().rev() {
+                    if ancestor.extension().is_some_and(|x| x == "app") {
+                        candidates.push(ancestor.join("Contents/Info.plist"));
+                    }
+                }
+            }
+        }
+    }
     if let Some(cli) = home.cli().and_then(|p| p.canonicalize().ok()) {
-        for ancestor in cli.ancestors() {
+        for ancestor in cli.ancestors().collect::<Vec<_>>().into_iter().rev() {
             if ancestor.extension().is_some_and(|x| x == "app") {
                 candidates.push(ancestor.join("Contents/Info.plist"));
             }
         }
+        // T3's installed launcher is a shell file, not a symlink into the bundle.
+        // Read its quoted app assignment without executing it or changing this home.
+        if let Ok(text) = std::fs::read_to_string(&cli) {
+            for line in text.lines() {
+                if let Some(app) = line.trim().strip_prefix("app=") {
+                    let app = app.trim();
+                    let path = app
+                        .strip_prefix('\'')
+                        .and_then(|s| s.strip_suffix('\''))
+                        .or_else(|| app.strip_prefix('"').and_then(|s| s.strip_suffix('"')));
+                    if let Some(path) = path {
+                        for ancestor in std::path::Path::new(path)
+                            .ancestors()
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                        {
+                            if ancestor.extension().is_some_and(|x| x == "app") {
+                                candidates.push(ancestor.join("Contents/Info.plist"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
+    candidates.push("/Applications/T3 Code.app/Contents/Info.plist".into());
     for path in candidates {
         if let Ok(text) = std::fs::read_to_string(path) {
             if let Some((_, tail)) = text.split_once("<key>CFBundleShortVersionString</key>") {
@@ -347,6 +436,13 @@ pub(super) fn validate(kind: &str, raw: &str) -> anyhow::Result<()> {
     let value: serde_json::Value =
         serde_json::from_str(raw).map_err(|_| anyhow::anyhow!("invalid JSON"))?;
     if let Some(selection) = value.get("modelSelection") {
+        anyhow::ensure!(
+            selection
+                .get("model")
+                .and_then(|v| v.as_str())
+                .is_some_and(|m| !m.is_empty() && m == m.trim()),
+            "modelSelection.model must be nonempty and trimmed"
+        );
         let routed = selection
             .get("instanceId")
             .or_else(|| selection.get("provider"));
@@ -545,54 +641,136 @@ thread_local! {
 #[cfg(test)]
 mod process_tests {
     use super::*;
+    fn matches(exe: &str, args: &[&str], home: &T3Home, default: bool) -> bool {
+        let argv = std::iter::once(exe)
+            .chain(args.iter().copied())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        process_for_home(
+            Some(std::path::Path::new(exe)),
+            &argv,
+            home,
+            default.then_some(home.base.as_path()),
+        )
+    }
     #[test]
     fn detects_server_service_app_and_respects_home() {
         let home = T3Home {
-            base: "/tmp/t3-test".into(),
+            base: "/tmp/t3 test".into(),
         };
-        assert!(process_for_home(
-            "/usr/local/bin/t3 service run --base-dir /tmp/t3-test",
+        assert!(matches(
+            "/usr/local/bin/t3",
+            &["service", "run", "--base-dir", "/tmp/t3 test"],
             &home,
-            None
+            false
         ));
-        assert!(process_for_home(
-            "/usr/bin/node /opt/t3code/apps/server/dist/index.js --base-dir=/tmp/t3-test",
+        assert!(matches(
+            "/usr/bin/node",
+            &[
+                "/opt/t3code/apps/server/dist/index.js",
+                "--base-dir=/tmp/t3 test"
+            ],
             &home,
-            None
+            false
         ));
-        assert!(!process_for_home(
-            "/usr/local/bin/t3 service run --base-dir /tmp/other",
+        assert!(!matches(
+            "/usr/local/bin/t3",
+            &["service", "run", "--base-dir", "/tmp/other"],
             &home,
-            None
+            false
         ));
-        assert!(!process_for_home(
-            "/usr/local/bin/t3 project add /tmp/t3-test",
+        assert!(!matches(
+            "/usr/local/bin/t3",
+            &["project", "add", "/tmp/t3 test"],
             &home,
-            None
+            true
         ));
-        assert!(!process_for_home(
-            "/usr/local/bin/python script.py /tmp/t3-test t3code server",
-            &home,
-            None
+        assert!(matches(
+            "/usr/local/bin/t3",
+            &["--base-dir", "/tmp/project settings", "service", "run"],
+            &T3Home {
+                base: "/tmp/project settings".into()
+            },
+            false
         ));
-        assert!(process_for_home(
-            "/Applications/T3 Code.app/Contents/MacOS/T3 Code",
+        assert!(!matches(
+            "/usr/local/bin/python",
+            &["script.py", "t3code server"],
             &home,
-            Some(&home.base)
+            true
         ));
-        assert!(!process_for_home(
-            "/Applications/T3 Code.app/Contents/MacOS/T3 Code",
+        assert!(matches(
+            "/Users/test/Applications/T3 Code.app/Contents/MacOS/T3 Code",
+            &[],
             &home,
-            None
+            true
+        ));
+        assert!(!matches(
+            "/Users/test/Applications/T3 Code.app/Contents/MacOS/T3 Code",
+            &[],
+            &home,
+            false
+        ));
+        assert!(!matches(
+            "/Users/test/Applications/T3 Code.app/Contents/MacOS/T3 Code",
+            &[
+                "/Users/test/Applications/T3 Code.app/Contents/Resources/app.asar/apps/server/dist/bin.mjs",
+                "project",
+                "add",
+                "/tmp/t3 test"
+            ],
+            &home,
+            true
+        ));
+        assert!(matches(
+            "/Users/test/Applications/T3 Code.app/Contents/MacOS/T3 Code",
+            &[
+                "/Users/test/Applications/T3 Code.app/Contents/Resources/app.asar/apps/server/dist/bin.mjs",
+                "--base-dir",
+                "/tmp/t3 test"
+            ],
+            &home,
+            false
+        ));
+        assert!(!matches(
+            "C:\\Apps\\t3.exe",
+            &["service", "status"],
+            &home,
+            true
+        ));
+        assert!(matches(
+            "C:\\Apps\\t3.exe",
+            &["service", "run"],
+            &home,
+            true
         ));
     }
-}
 
-fn argument_path(suffix: &str) -> &str {
-    if let Some(quote) = suffix.chars().next().filter(|c| matches!(c, '\'' | '"')) {
-        let rest = &suffix[1..];
-        rest.split(quote).next().unwrap_or("")
-    } else {
-        suffix.split_whitespace().next().unwrap_or("")
+    #[cfg(unix)]
+    #[test]
+    fn version_prefers_this_homes_launcher_bundle() -> anyhow::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir()?;
+        let home = T3Home {
+            base: dir.path().into(),
+        };
+        let app = dir.path().join("My T3 Code.app");
+        std::fs::create_dir_all(app.join("Contents"))?;
+        std::fs::write(
+            app.join("Contents/Info.plist"),
+            "<key>CFBundleShortVersionString</key><string>fixture-version</string>",
+        )?;
+        std::fs::create_dir(home.base.join("bin"))?;
+        let cli = home.base.join("bin/t3");
+        std::fs::write(
+            &cli,
+            format!(
+                "#!/bin/sh\napp='{}'\n",
+                app.join("Contents/MacOS/T3 Code").display()
+            ),
+        )?;
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700))?;
+        assert_eq!(t3_version(&home), "fixture-version");
+        Ok(())
     }
 }

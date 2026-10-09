@@ -158,7 +158,7 @@ impl App {
         let s = &self.sessions[idx];
         match (&self.snapshot, self.instance_for(s.provider)) {
             (Some(snap), Some(instance)) => {
-                snap.thread_ids.contains(&t3db::thread_id_for(instance, &s.session_id))
+                snap.has_native(s.provider, &s.session_id) || snap.thread_ids.contains(&t3db::thread_id_for(instance, &s.session_id))
             }
             _ => false,
         }
