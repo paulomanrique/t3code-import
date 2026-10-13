@@ -129,40 +129,37 @@ fn copy_and_open(src: &Path, dir: &Path) -> anyhow::Result<Connection> {
     open_readonly(&dest)
 }
 
+/// Opens the private copy made by the caller. Plain path, no URI: SQLite may
+/// create its `-shm` next to the copy, which is ours to throw away.
 fn open_readonly(path: &Path) -> anyhow::Result<Connection> {
-    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI;
-    let primary = sqlite_uri(path, "mode=ro");
-    match Connection::open_with_flags(&primary, flags) {
-        Ok(conn) => {
-            let _ = conn.busy_timeout(std::time::Duration::from_millis(500));
-            let _ = conn.pragma_update(None, "query_only", "ON");
-            Ok(conn)
-        }
-        Err(error) => {
-            let fallback = sqlite_uri(path, "mode=ro&immutable=1");
-            Connection::open_with_flags(&fallback, flags).map_err(|fallback_error| {
-                anyhow::anyhow!(
-                    "open {}: {error}; immutable: {fallback_error}",
-                    path.display()
-                )
-            })
-        }
-    }
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("open {}", path.display()))?;
+    let _ = conn.busy_timeout(std::time::Duration::from_millis(500));
+    let _ = conn.pragma_update(None, "query_only", "ON");
+    Ok(conn)
 }
 
+#[cfg(test)]
 fn sqlite_uri(path: &Path, query: &str) -> String {
     let absolute = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let mut raw = absolute.to_string_lossy().replace('\\', "/");
+    // Windows verbatim prefix from canonicalize: \\?\C:\x -> C:/x
+    if let Some(rest) = raw.strip_prefix("//?/") {
+        raw = rest.to_string();
+    }
     let mut encoded = String::new();
-    for ch in absolute.to_string_lossy().chars() {
+    for ch in raw.chars() {
         match ch {
             '%' => encoded.push_str("%25"),
             '?' => encoded.push_str("%3f"),
             '#' => encoded.push_str("%23"),
-            '\\' => encoded.push('/'),
             other => encoded.push(other),
         }
     }
-    format!("file:{encoded}?{query}")
+    if !encoded.starts_with('/') {
+        encoded.insert(0, '/'); // drive letter: file:///C:/x
+    }
+    format!("file://{encoded}?{query}")
 }
 
 fn columns(conn: &Connection, table: &str) -> HashSet<String> {
