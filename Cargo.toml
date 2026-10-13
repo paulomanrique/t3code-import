@@ -2,6 +2,11 @@
 name = "t3-import"
 version = "0.1.0"
 edition = "2024"
+description = "Import Claude Code, Codex, Grok and OpenCode sessions into T3 Code"
+license = "MIT"
+repository = "https://github.com/paulomanrique/t3code-import"
+readme = "README.md"
+keywords = ["t3code", "claude", "codex", "cli", "import"]
 
 [dependencies]
 anyhow = "1.0.104"
@@ -23,3 +28,8 @@ walkdir = "2.5.0"
 
 [dev-dependencies]
 tempfile = "3.27.0"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

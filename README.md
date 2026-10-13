@@ -49,8 +49,20 @@ The complete user and assistant text of each conversation. Tool calls and their 
 
 ## Install
 
-Download the binary for your platform from Releases, or build from source:
+macOS and Linux:
 
 ```sh
-cargo install --path .
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/paulomanrique/t3code-import/releases/latest/download/t3-import-installer.sh | sh
 ```
+
+Windows (PowerShell):
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/paulomanrique/t3code-import/releases/latest/download/t3-import-installer.ps1 | iex"
+```
+
+Or download a binary from [Releases](https://github.com/paulomanrique/t3code-import/releases), or build from source with `cargo install --git https://github.com/paulomanrique/t3code-import`.
+
+## Reporting a database change
+
+If t3-import stops with "This version of T3 Code changed its database", open the link it prints. It fills in an issue with your T3 version and the tables or fields that differ, without any of your conversations. Support for the new shape usually needs only an update to the known schema list.
