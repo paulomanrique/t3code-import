@@ -24,6 +24,72 @@ fn database_copy() -> anyhow::Result<Option<(tempfile::TempDir, T3Home)>> {
     let home = T3Home::detect(Some(dir.path().into()))?;
     Ok(Some((dir, home)))
 }
+// The fixture uses the exact guarded DDL, with only the read-only project catalog
+// added separately (T3's project projection is outside the guarded thread schema).
+fn fixture_database() -> anyhow::Result<(tempfile::TempDir, T3Home)> {
+    let dir = tempfile::tempdir()?;
+    std::fs::create_dir(dir.path().join("userdata"))?;
+    let home = T3Home {
+        base: dir.path().canonicalize()?,
+    };
+    let db = Connection::open(home.db_path())?;
+    let known: toml::Value = toml::from_str(include_str!("../../known_schemas.toml"))?;
+    let objects = known["objects"].as_array().unwrap();
+    for kind in ["table", "index"] {
+        for object in objects {
+            let sql = object["sql"].as_str().unwrap();
+            if object["type"].as_str() == Some(kind) && !sql.is_empty() {
+                db.execute_batch(sql)?;
+            }
+        }
+    }
+    db.execute_batch("CREATE TABLE projection_projects(project_id TEXT PRIMARY KEY,title TEXT NOT NULL,workspace_root TEXT NOT NULL,deleted_at TEXT);
+        INSERT INTO orchestration_v2_projection_metadata VALUES ('thread-projections',2,0,'2026-10-01T12:00:00.000Z');")?;
+    let root = home.base.join("project");
+    std::fs::create_dir(&root)?;
+    db.execute(
+        "INSERT INTO projection_projects VALUES ('fixture-project','Fixture',?,NULL)",
+        [root.to_string_lossy()],
+    )?;
+    drop(db);
+    // Populate valid payloads through the normal writer, so tests can also exercise
+    // drift detection and native-session deduplication without a local T3 install.
+    let req = request(&home, Provider::Codex, "fixture-seed")?;
+    let report = import(&home, vec![req], &ImportOptions::default(), &mut |_| {})?;
+    if let Some(backup) = report.backup {
+        std::fs::remove_file(backup)?;
+    }
+    Ok((dir, home))
+}
+fn database_for_tests() -> anyhow::Result<Option<(tempfile::TempDir, T3Home)>> {
+    if dirs::home_dir().is_some_and(|p| p.join(".t3/userdata/statev2.sqlite").is_file()) {
+        database_copy()
+    } else {
+        fixture_database().map(Some)
+    }
+}
+#[test]
+fn reproducible_fixture_imports_without_installed_t3() -> anyhow::Result<()> {
+    let _closed = ClosedInventory::new();
+    let (_dir, home) = fixture_database()?;
+    assert!(check(&home)?.ok());
+    let req = request(&home, Provider::Grok, "fixture-import")?;
+    let report = import(
+        &home,
+        vec![req.clone()],
+        &ImportOptions::default(),
+        &mut |_| {},
+    )?;
+    assert_eq!(
+        report.imported,
+        vec![thread_id_for("grok", "fixture-import")]
+    );
+    assert!(report.backup.as_ref().unwrap().is_file());
+    let again = import(&home, vec![req], &ImportOptions::default(), &mut |_| {})?;
+    assert!(again.imported.is_empty());
+    assert_eq!(again.skipped.len(), 1);
+    Ok(())
+}
 fn no_database() -> anyhow::Result<()> {
     eprintln!("SKIP: no T3 database");
     anyhow::ensure!(
@@ -368,7 +434,7 @@ fn assert_native_shapes(db: &Connection, id: &str) -> anyhow::Result<()> {
 #[test]
 fn structure_and_payload_drift_fail_closed() -> anyhow::Result<()> {
     let _closed = ClosedInventory::new();
-    let Some((_dir, home)) = database_copy()? else {
+    let Some((_dir, home)) = database_for_tests()? else {
         return Ok(());
     };
     let db = Connection::open(home.db_path())?;
@@ -396,7 +462,12 @@ fn structure_and_payload_drift_fail_closed() -> anyhow::Result<()> {
     )?;
     let report = check(&home)?;
     assert!(report.ok(), "{}", findings(&report));
-    assert!(report.warnings.iter().any(|w| w.contains("synthetic_plain_index")));
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains("synthetic_plain_index"))
+    );
     db.execute("DROP INDEX synthetic_plain_index", [])?;
     db.execute(
         "DROP INDEX orchestration_v2_projection_turn_items_failed_error_idx",
@@ -404,7 +475,12 @@ fn structure_and_payload_drift_fail_closed() -> anyhow::Result<()> {
     )?;
     let report = check(&home)?;
     assert!(report.ok(), "{}", findings(&report));
-    assert!(report.warnings.iter().any(|w| w.contains("dropped") && w.contains("failed_error_idx")));
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains("dropped") && w.contains("failed_error_idx"))
+    );
     // A unique index can reject rows, so it stops the import.
     db.execute(
         "CREATE UNIQUE INDEX synthetic_drift_index ON orchestration_v2_projection_messages(role, message_id)",
@@ -432,7 +508,7 @@ fn structure_and_payload_drift_fail_closed() -> anyhow::Result<()> {
 #[test]
 fn dry_run_does_not_write_and_limit_keeps_newest() -> anyhow::Result<()> {
     let _closed = ClosedInventory::new();
-    let Some((_dir, home)) = database_copy()? else {
+    let Some((_dir, home)) = database_for_tests()? else {
         return Ok(());
     };
     let mut request = request(&home, Provider::Grok, "dry-run")?;
@@ -587,7 +663,7 @@ fn assert_sql_row_shape(
 #[test]
 fn transaction_rolls_back_all_threads_on_late_failure() -> anyhow::Result<()> {
     let _closed = ClosedInventory::new();
-    let Some((_dir, home)) = database_copy()? else {
+    let Some((_dir, home)) = database_for_tests()? else {
         return Ok(());
     };
     let first = request(&home, Provider::Grok, "rollback-first")?;
@@ -602,15 +678,18 @@ fn transaction_rolls_back_all_threads_on_late_failure() -> anyhow::Result<()> {
         [],
         |r| r.get::<_, i64>(0),
     )?;
-    assert!(
-        import(
-            &home,
-            vec![first, second],
-            &ImportOptions::default(),
-            &mut |_| {}
-        )
-        .is_err()
-    );
+    let error = import(
+        &home,
+        vec![first, second],
+        &ImportOptions::default(),
+        &mut |_| {},
+    )
+    .unwrap_err();
+    let failure = error
+        .downcast_ref::<writer::ImportFailure>()
+        .expect("typed recovery details");
+    assert!(failure.backup.as_ref().unwrap().is_file());
+    assert!(failure.projects_created.is_empty());
     let db = guard::readonly(&home)?;
     assert_eq!(
         db.query_row("SELECT count(*) FROM orchestration_events", [], |r| r
@@ -628,7 +707,7 @@ fn transaction_rolls_back_all_threads_on_late_failure() -> anyhow::Result<()> {
 #[test]
 fn running_process_refuses_before_backup() -> anyhow::Result<()> {
     let _closed = ClosedInventory::new();
-    let Some((_dir, home)) = database_copy()? else {
+    let Some((_dir, home)) = database_for_tests()? else {
         return Ok(());
     };
     let request = request(&home, Provider::Grok, "running")?;
@@ -669,7 +748,7 @@ fn missing_worktree_requires_registered_owner() -> anyhow::Result<()> {
 #[test]
 fn missing_unowned_folder_skips_without_project_add() -> anyhow::Result<()> {
     let _closed = ClosedInventory::new();
-    let Some((_dir, home)) = database_copy()? else {
+    let Some((_dir, home)) = database_for_tests()? else {
         return Ok(());
     };
     let mut req = request(&home, Provider::Grok, "gone-folder")?;
@@ -694,7 +773,7 @@ fn missing_unowned_folder_skips_without_project_add() -> anyhow::Result<()> {
 #[test]
 fn native_session_started_by_t3_is_skipped() -> anyhow::Result<()> {
     let _closed = ClosedInventory::new();
-    let Some((_dir, home)) = database_copy()? else {
+    let Some((_dir, home)) = database_for_tests()? else {
         return Ok(());
     };
     let db = Connection::open(home.db_path())?;
@@ -729,7 +808,7 @@ fn native_session_started_by_t3_is_skipped() -> anyhow::Result<()> {
 #[test]
 fn existing_runtime_merges_cwd_and_deduplicates_sources() -> anyhow::Result<()> {
     let _closed = ClosedInventory::new();
-    let Some((_dir, home)) = database_copy()? else {
+    let Some((_dir, home)) = database_for_tests()? else {
         return Ok(());
     };
     let mut req = request(&home, Provider::Codex, "runtime-merge")?;
@@ -764,7 +843,7 @@ fn existing_runtime_merges_cwd_and_deduplicates_sources() -> anyhow::Result<()> 
 #[test]
 fn registered_missing_worktree_imports_under_owning_project() -> anyhow::Result<()> {
     let _closed = ClosedInventory::new();
-    let Some((_dir, home)) = database_copy()? else {
+    let Some((_dir, home)) = database_for_tests()? else {
         return Ok(());
     };
     let main = home.base.join("main");

@@ -1,3 +1,16 @@
+#[derive(Debug)]
+pub struct ImportFailure {
+    pub message: String,
+    pub backup: Option<std::path::PathBuf>,
+    pub projects_created: Vec<std::path::PathBuf>,
+}
+impl std::fmt::Display for ImportFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.message.fmt(f)
+    }
+}
+impl std::error::Error for ImportFailure {}
+
 use super::{
     ImportOptions, ImportReport, ImportRequest, Progress, ProjectRef, Snapshot, T3Home, guard,
     payload, thread_id_for,
@@ -136,7 +149,10 @@ fn snapshot_db(db: &Connection) -> anyhow::Result<Snapshot> {
         for native in natives.into_iter().flatten() {
             let key = (driver.clone(), native);
             result.native_sessions.insert(key.clone());
-            result.native_owners.entry(key).or_insert_with(|| owner.clone());
+            result
+                .native_owners
+                .entry(key)
+                .or_insert_with(|| owner.clone());
         }
     }
     Ok(result)
@@ -372,12 +388,14 @@ pub fn import(
         }
         Ok(())
     })();
-    outcome.with_context(|| {
-        format!(
-            "import failed; projects created: {:?}",
-            report.projects_created
-        )
-    })?;
+    if let Err(error) = outcome {
+        return Err(ImportFailure {
+            message: format!("{error:#}"),
+            backup: report.backup,
+            projects_created: report.projects_created,
+        }
+        .into());
+    }
     Ok(report)
 }
 
@@ -946,7 +964,10 @@ mod tests {
         // Claude's cursor threadId is T3's own id, not the CLI session.
         assert!(!state.has_native(Provider::Claude, "t-claude"));
         assert!(state.has_native(Provider::Codex, "codex-native"));
-        assert_eq!(state.native_owners[&("codex".into(), "codex-native".into())], "t-codex");
+        assert_eq!(
+            state.native_owners[&("codex".into(), "codex-native".into())],
+            "t-codex"
+        );
         Ok(())
     }
 

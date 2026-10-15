@@ -1,4 +1,5 @@
 [package]
+default-run = "t3-import"
 name = "t3-import"
 version = "0.1.0"
 edition = "2024"
@@ -8,23 +9,40 @@ repository = "https://github.com/paulomanrique/t3code-import"
 readme = "README.md"
 keywords = ["t3code", "claude", "codex", "cli", "import"]
 
+[features]
+default = ["gui"]
+gui = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-opener", "dep:trash"]
+
+[[bin]]
+name = "t3-import"
+path = "src/main.rs"
+required-features = ["gui"]
+
 [dependencies]
 anyhow = "1.0.104"
 chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6.7", features = ["derive"] }
-crossterm = "0.29.0"
+ctrlc = { version = "3", features = ["termination"] }
 dirs = "7.0.0"
 hex = "0.4.3"
-ratatui = "0.30.2"
 rayon = "1.12.0"
 rusqlite = { version = "0.40.2", features = ["bundled", "backup"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sysinfo = "0.37"
 sha2 = "0.11.0"
+tauri = { version = "2", features = ["custom-protocol"], optional = true }
+tauri-plugin-opener = { version = "2", optional = true }
+trash = { version = "5", optional = true }
 toml = "1.1.8"
 urlencoding = "2.1.3"
 walkdir = "2.5.0"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [], optional = true }
 
 [dev-dependencies]
 tempfile = "3.27.0"

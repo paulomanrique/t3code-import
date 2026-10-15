@@ -8,40 +8,43 @@ Imported threads resume the original session in its own CLI: T3 continues the sa
 
 ## Use
 
-Close T3 Code first: the app, the server, and the background service, if you installed it. t3-import writes to T3's database and refuses to run while T3 is open.
-
 ```sh
 t3-import
 ```
 
-| Key | |
-|---|---|
-| `space` | select a session, or every session of a project |
-| `a` | select everything visible |
-| `enter` / `→` / `←` | open or close a project |
-| `/` | search titles, folders and session ids |
-| `1`–`4` | show or hide Claude, Codex, Grok, OpenCode |
-| `m` | keep only the newest N messages per thread (default: all) |
-| `i` | review and import |
+A window opens with three columns:
 
-Sessions already in T3 are marked `in T3` and can't be selected again.
+- **Folders.** Every folder where a session ran, as a tree. A folder that is a git worktree says which repository it belongs to and on which branch; its threads go into that repository's T3 project.
+- **Threads.** The sessions of the selected folder and its subfolders, newest first. Tick the ones you want, or use **Select all** at the top, then **Add to T3** or **Delete**.
+- **Conversation.** The selected thread as you'll see it in T3, plus where it ran and which project it goes to.
 
-Each session goes into the T3 project for the folder it ran in, and t3-import creates missing projects with T3's own `t3 project add`. A session that ran inside a git worktree goes into the main repository's project and keeps its worktree and branch.
+Threads already in T3 are hidden; turn on **Show threads already in T3** to see them. The buttons at the top show or hide each CLI, and the search box looks through titles, folders and session ids.
 
-Scripting:
+**Add to T3** puts each thread into the T3 project for the folder it ran in, creating missing projects with T3's own `t3 project add`. By default the whole history comes along; you can keep only the newest messages of each thread instead.
+
+T3 has to be closed while threads are written. If it's running, the dialog shows what is open and offers **Close T3**: a background service (launchd on macOS, systemd on Linux) is stopped and started again when the import ends, and the app is closed. If you cancel after closing it, a bar at the top lets you start the service again.
+
+**Delete** moves the selected sessions to the system Trash, where you can restore them. T3 isn't changed. OpenCode keeps sessions in its own database, so those are exported with `opencode export` first (bring one back with `opencode import <file>`) and then removed with `opencode session delete`.
+
+### Command line
+
+The same binary runs without a window when given a command, and `t3-import-cli` is a build without the window at all, for machines without a desktop:
 
 ```sh
-t3-import list --json
-t3-import check
-t3-import import claude:<session-id> codex:<session-id> --dry-run
+t3-import-cli list --json
+t3-import-cli check
+t3-import-cli import claude:<session-id> codex:<session-id> --dry-run
+t3-import-cli import claude:<session-id> --close-t3
 ```
+
+`--close-t3` closes T3 the same way the window does and starts its service again afterwards.
 
 ## Safety
 
 - **Backup first.** Before writing, t3-import copies `statev2.sqlite` to `statev2.sqlite.bak-t3import-<timestamp>` next to it. To undo an import, close T3 and copy the backup back.
 - **Fail closed.** T3 Code changes quickly. Before writing anything, t3-import compares the tables it writes to, and the shape of the data already in them, with what it knows. If anything differs, it stops without touching the database and gives you a prefilled link to open an issue here, so support can be added.
 - **One transaction.** All threads are written in a single transaction and re-checked before commit. Either everything lands or nothing does.
-- **Read-only on your CLIs.** Session files and databases of Claude, Codex, Grok and OpenCode are only read.
+- **Your CLIs' sessions are only read when importing.** Only **Delete** changes them, and it moves files to the Trash rather than erasing them. Before moving anything it checks that the files are exactly the ones you confirmed; a session that changed in the meantime is left alone.
 
 ## What gets imported
 
@@ -60,6 +63,8 @@ Windows (PowerShell):
 ```powershell
 powershell -ExecutionPolicy Bypass -c "irm https://github.com/paulomanrique/t3code-import/releases/latest/download/t3-import-installer.ps1 | iex"
 ```
+
+On Linux the window needs WebKitGTK (`libwebkit2gtk-4.1-0` on Debian and Ubuntu, `webkit2gtk4.1` on Fedora, `webkit2gtk-4.1` on Arch). `t3-import-cli` doesn't.
 
 Or download a binary from [Releases](https://github.com/paulomanrique/t3code-import/releases), or build from source with `cargo install --git https://github.com/paulomanrique/t3code-import`.
 

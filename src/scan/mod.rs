@@ -3,7 +3,7 @@
 mod claude;
 mod codex;
 mod grok;
-mod opencode;
+pub(crate) mod opencode;
 mod util;
 
 use std::path::PathBuf;

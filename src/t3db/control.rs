@@ -30,7 +30,11 @@ const CLOSE_TIMEOUT: Duration = Duration::from_secs(20);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Owner {
     /// A launchd agent (macOS). `plist` is what `bootstrap` needs to load it again.
-    Launchd { domain: String, label: String, plist: Option<PathBuf> },
+    Launchd {
+        domain: String,
+        label: String,
+        plist: Option<PathBuf>,
+    },
     /// A systemd user unit (Linux), such as the one `t3 service install` sets up.
     SystemdUser { unit: String },
     /// A system-wide unit. Stopping it needs root, so t3-import leaves it alone.
@@ -54,7 +58,11 @@ pub struct RunningT3 {
 
 impl RunningT3 {
     fn pid_list(&self) -> String {
-        self.processes.iter().map(|(pid, _)| pid.to_string()).collect::<Vec<_>>().join(", ")
+        self.processes
+            .iter()
+            .map(|(pid, _)| pid.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     /// What is running, in a few words.
@@ -90,7 +98,10 @@ impl RunningT3 {
     pub fn can_close(&self) -> bool {
         matches!(
             self.owner,
-            Owner::Launchd { plist: Some(_), .. } | Owner::SystemdUser { .. } | Owner::App | Owner::Process
+            Owner::Launchd { plist: Some(_), .. }
+                | Owner::SystemdUser { .. }
+                | Owner::App
+                | Owner::Process
         )
     }
 }
@@ -102,6 +113,19 @@ pub struct Restart {
 }
 
 impl Restart {
+    pub fn names(&self) -> Vec<String> {
+        self.jobs
+            .iter()
+            .map(|owner| {
+                RunningT3 {
+                    owner: owner.clone(),
+                    processes: vec![],
+                }
+                .name()
+            })
+            .collect()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.jobs.is_empty()
     }
@@ -113,11 +137,20 @@ impl Restart {
     /// Starts every stopped job again, one line per job saying how it went. Jobs
     /// that fail to start stay owed, so the caller can try again.
     pub fn run(&mut self) -> Vec<Result<String, String>> {
+        self.run_with(start)
+    }
+
+    fn run_with(
+        &mut self,
+        start_job: impl Fn(&Owner) -> Result<String, String>,
+    ) -> Vec<Result<String, String>> {
         let mut failed = Vec::new();
-        let results = std::mem::take(&mut self.jobs)
+        let results = self
+            .jobs
+            .clone()
             .into_iter()
             .map(|job| {
-                let result = start(&job);
+                let result = start_job(&job);
                 if result.is_err() {
                     failed.push(job);
                 }
@@ -131,16 +164,30 @@ impl Restart {
 
 fn start(job: &Owner) -> Result<String, String> {
     match job {
-        Owner::Launchd { domain, label, plist: Some(plist) } => {
-            run(Command::new("launchctl").arg("bootstrap").arg(domain).arg(plist))
-                .map(|()| format!("Started the T3 background service {label} again."))
+        Owner::Launchd {
+            domain,
+            label,
+            plist: Some(plist),
+        } => run(Command::new("launchctl")
+            .arg("bootstrap")
+            .arg(domain)
+            .arg(plist))
+        .map(|()| format!("Started the T3 background service {label} again."))
+        .map_err(|e| {
+            format!(
+                "Couldn't start {label} again: {e:#}. Run: launchctl bootstrap {domain} {}",
+                plist.display()
+            )
+        }),
+        Owner::SystemdUser { unit } => {
+            run(Command::new("systemctl").args(["--user", "start", unit]))
+                .map(|()| format!("Started the T3 background service {unit} again."))
                 .map_err(|e| {
-                    format!("Couldn't start {label} again: {e:#}. Run: launchctl bootstrap {domain} {}", plist.display())
+                    format!(
+                        "Couldn't start {unit} again: {e:#}. Run: systemctl --user start {unit}"
+                    )
                 })
         }
-        Owner::SystemdUser { unit } => run(Command::new("systemctl").args(["--user", "start", unit]))
-            .map(|()| format!("Started the T3 background service {unit} again."))
-            .map_err(|e| format!("Couldn't start {unit} again: {e:#}. Run: systemctl --user start {unit}")),
         other => Err(format!("t3-import doesn't start {other:?}")),
     }
 }
@@ -150,18 +197,30 @@ pub fn find(home: &T3Home) -> anyhow::Result<Vec<RunningT3>> {
     let system = System::new_all();
     let blocking = guard::running_pids(home, &system)?;
     let verified = guard::t3_processes(home, &system);
-    let launchd = if cfg!(target_os = "macos") { launchd_jobs() } else { HashMap::new() };
+    let launchd = if cfg!(target_os = "macos") {
+        launchd_jobs()
+    } else {
+        HashMap::new()
+    };
 
     let mut grouped: BTreeMap<String, RunningT3> = BTreeMap::new();
     for &pid in blocking.keys() {
         let (owner, started) = match verified.get(&pid) {
             Some(&started) => (owner_of(pid, &system, &launchd), started),
-            None => (Owner::Unverified, system.process(Pid::from_u32(pid as u32)).map_or(0, |p| p.start_time())),
+            None => (
+                Owner::Unverified,
+                system
+                    .process(Pid::from_u32(pid as u32))
+                    .map_or(0, |p| p.start_time()),
+            ),
         };
         let key = format!("{owner:?}");
         grouped
             .entry(key)
-            .or_insert_with(|| RunningT3 { owner, processes: Vec::new() })
+            .or_insert_with(|| RunningT3 {
+                owner,
+                processes: Vec::new(),
+            })
             .processes
             .push((pid, started));
     }
@@ -172,52 +231,72 @@ pub fn find(home: &T3Home) -> anyhow::Result<Vec<RunningT3>> {
 /// If T3 doesn't go away, whatever was stopped is started again before the error
 /// is returned.
 pub fn close(home: &T3Home, running: &[RunningT3]) -> anyhow::Result<Restart> {
+    let mut restart = Restart::default();
+    match close_into(home, running, &mut restart) {
+        Ok(()) => Ok(restart),
+        Err(e) => {
+            let restarted: Vec<String> = restart
+                .run()
+                .into_iter()
+                .map(|r| r.unwrap_or_else(|e| e))
+                .collect();
+            if restarted.is_empty() {
+                Err(e)
+            } else {
+                Err(e.context(restarted.join(" ")))
+            }
+        }
+    }
+}
+
+/// Records stopped services even when closing fails. The caller owns recovery.
+pub fn close_into(
+    home: &T3Home,
+    running: &[RunningT3],
+    restart: &mut Restart,
+) -> anyhow::Result<()> {
     if let Some(blocked) = running.iter().find(|r| !r.can_close()) {
         bail!("{}: {}", blocked.name(), blocked.plan());
     }
-    let mut restart = Restart::default();
-    let result = (|| -> anyhow::Result<()> {
-        for item in running {
-            match &item.owner {
-                Owner::Launchd { domain, label, plist: Some(_) } => {
-                    run(Command::new("launchctl").arg("bootout").arg(format!("{domain}/{label}")))
-                        .with_context(|| format!("stop {label}"))?;
-                    restart.jobs.push(item.owner.clone());
-                }
-                Owner::SystemdUser { unit } => {
-                    run(Command::new("systemctl").args(["--user", "stop", unit]))
-                        .with_context(|| format!("stop {unit}"))?;
-                    restart.jobs.push(item.owner.clone());
-                }
-                Owner::App | Owner::Process => {
-                    // Re-identify right before signalling: the PID must still be a
-                    // T3 process for this home, started at the same moment.
-                    let system = System::new_all();
-                    let now = guard::t3_processes(home, &system);
-                    for &(pid, started) in &item.processes {
-                        if now.get(&pid) != Some(&started) {
-                            continue;
-                        }
-                        if let Some(process) = system.process(Pid::from_u32(pid as u32)) {
-                            // Windows has no SIGTERM; `kill` is the only option there.
-                            if process.kill_with(Signal::Term).is_none() {
-                                process.kill();
-                            }
+    for item in running {
+        match &item.owner {
+            Owner::Launchd {
+                domain,
+                label,
+                plist: Some(_),
+            } => {
+                run(Command::new("launchctl")
+                    .arg("bootout")
+                    .arg(format!("{domain}/{label}")))
+                .with_context(|| format!("stop {label}"))?;
+                restart.jobs.push(item.owner.clone());
+            }
+            Owner::SystemdUser { unit } => {
+                run(Command::new("systemctl").args(["--user", "stop", unit]))
+                    .with_context(|| format!("stop {unit}"))?;
+                restart.jobs.push(item.owner.clone());
+            }
+            Owner::App | Owner::Process => {
+                // Re-identify right before signalling: the PID must still be a
+                // T3 process for this home, started at the same moment.
+                let system = System::new_all();
+                let now = guard::t3_processes(home, &system);
+                for &(pid, started) in &item.processes {
+                    if now.get(&pid) != Some(&started) {
+                        continue;
+                    }
+                    if let Some(process) = system.process(Pid::from_u32(pid as u32)) {
+                        // Windows has no SIGTERM; `kill` is the only option there.
+                        if process.kill_with(Signal::Term).is_none() {
+                            process.kill();
                         }
                     }
                 }
-                _ => unreachable!("checked by can_close"),
             }
-        }
-        wait_until_closed(home, CLOSE_TIMEOUT)
-    })();
-    match result {
-        Ok(()) => Ok(restart),
-        Err(e) => {
-            let restarted: Vec<String> = restart.run().into_iter().map(|r| r.unwrap_or_else(|e| e)).collect();
-            if restarted.is_empty() { Err(e) } else { Err(e.context(restarted.join(" "))) }
+            _ => unreachable!("checked by can_close"),
         }
     }
+    wait_until_closed(home, CLOSE_TIMEOUT)
 }
 
 fn wait_until_closed(home: &T3Home, timeout: Duration) -> anyhow::Result<()> {
@@ -245,7 +324,7 @@ fn run(cmd: &mut Command) -> anyhow::Result<()> {
 }
 
 /// `Command::output` with a time limit: a hung child is killed, not waited on.
-pub(super) fn output_timeout(cmd: &mut Command, timeout: Duration) -> anyhow::Result<Output> {
+pub(crate) fn output_timeout(cmd: &mut Command, timeout: Duration) -> anyhow::Result<Output> {
     let program = cmd.get_program().to_string_lossy().into_owned();
     let mut child = cmd
         .stdin(Stdio::null())
@@ -263,8 +342,18 @@ pub(super) fn output_timeout(cmd: &mut Command, timeout: Duration) -> anyhow::Re
             buf
         })
     };
-    let stdout = drain(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
-    let stderr = drain(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+    let stdout = drain(
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let stderr = drain(
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
     let start = Instant::now();
     let status = loop {
         if let Some(status) = child.try_wait()? {
@@ -277,13 +366,20 @@ pub(super) fn output_timeout(cmd: &mut Command, timeout: Duration) -> anyhow::Re
         }
         std::thread::sleep(Duration::from_millis(25));
     };
-    Ok(Output { status, stdout: stdout.join().unwrap_or_default(), stderr: stderr.join().unwrap_or_default() })
+    Ok(Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    })
 }
 
 fn uid() -> anyhow::Result<String> {
     let out = output_timeout(Command::new("id").arg("-u"), COMMAND_TIMEOUT)?;
     let uid = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    anyhow::ensure!(!uid.is_empty() && uid.chars().all(|c| c.is_ascii_digit()), "can't tell the user id");
+    anyhow::ensure!(
+        !uid.is_empty() && uid.chars().all(|c| c.is_ascii_digit()),
+        "can't tell the user id"
+    );
     Ok(uid)
 }
 
@@ -300,13 +396,22 @@ fn owner_of(pid: u64, system: &System, launchd: &HashMap<u64, String>) -> Owner 
     let argv_of = |pid: u64| -> Vec<String> {
         system
             .process(Pid::from_u32(pid as u32))
-            .map(|p| p.cmd().iter().map(|s| s.to_string_lossy().into_owned()).collect())
+            .map(|p| {
+                p.cmd()
+                    .iter()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .collect()
+            })
             .unwrap_or_default()
     };
     match launchd_owner(&chain, launchd, argv_of) {
         Some(Owner::Launchd { label, .. }) => {
             let (domain, plist) = launchd_locate(&label);
-            return Owner::Launchd { domain, label, plist };
+            return Owner::Launchd {
+                domain,
+                label,
+                plist,
+            };
         }
         Some(owner) => return owner,
         None => {}
@@ -323,7 +428,11 @@ fn owner_of(pid: u64, system: &System, launchd: &HashMap<u64, String>) -> Owner 
         .and_then(|p| p.exe())
         .map(|p| p.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default();
-    if exe.contains(".app/contents/") || exe.contains("t3code") || exe.contains("t3-code") || exe.contains("t3 code") {
+    if exe.contains(".app/contents/")
+        || exe.contains("t3code")
+        || exe.contains("t3-code")
+        || exe.contains("t3 code")
+    {
         Owner::App
     } else {
         Owner::Process
@@ -344,13 +453,23 @@ fn is_t3_launcher<S: AsRef<str>>(argv: &[S]) -> bool {
 /// is T3's. A server started from a terminal has the terminal's job above it, and
 /// that must never be booted out, so the job's own program has to be a T3
 /// launcher; an app opened from the Dock or Finder counts when it is T3's app.
-fn launchd_owner(chain: &[u64], jobs: &HashMap<u64, String>, argv_of: impl Fn(u64) -> Vec<String>) -> Option<Owner> {
-    let (job_pid, label) = chain.iter().find_map(|pid| jobs.get(pid).map(|label| (*pid, label)))?;
+fn launchd_owner(
+    chain: &[u64],
+    jobs: &HashMap<u64, String>,
+    argv_of: impl Fn(u64) -> Vec<String>,
+) -> Option<Owner> {
+    let (job_pid, label) = chain
+        .iter()
+        .find_map(|pid| jobs.get(pid).map(|label| (*pid, label)))?;
     if label.starts_with("application.") {
         let lower = label.to_ascii_lowercase();
         return (lower.contains("t3code") || lower.contains("t3tools")).then_some(Owner::App);
     }
-    is_t3_launcher(&argv_of(job_pid)).then(|| Owner::Launchd { domain: String::new(), label: label.clone(), plist: None })
+    is_t3_launcher(&argv_of(job_pid)).then(|| Owner::Launchd {
+        domain: String::new(),
+        label: label.clone(),
+        plist: None,
+    })
 }
 
 /// PID → label for the user's running launchd jobs.
@@ -378,12 +497,19 @@ fn launchd_locate(label: &str) -> (String, Option<PathBuf>) {
         return (String::new(), None);
     };
     for domain in [format!("gui/{uid}"), format!("user/{uid}")] {
-        let Ok(out) = output_timeout(Command::new("launchctl").arg("print").arg(format!("{domain}/{label}")), COMMAND_TIMEOUT)
-        else {
+        let Ok(out) = output_timeout(
+            Command::new("launchctl")
+                .arg("print")
+                .arg(format!("{domain}/{label}")),
+            COMMAND_TIMEOUT,
+        ) else {
             continue;
         };
         if out.status.success() {
-            return (domain, parse_launchctl_print_path(&String::from_utf8_lossy(&out.stdout)));
+            return (
+                domain,
+                parse_launchctl_print_path(&String::from_utf8_lossy(&out.stdout)),
+            );
         }
     }
     (format!("gui/{uid}"), None)
@@ -414,8 +540,13 @@ fn systemd_exec_start(unit: &str, user: bool) -> String {
 /// the user's terminal.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn systemd_owner(cgroup: &str, exec_start: impl Fn(&str, bool) -> String) -> Option<Owner> {
-    let path = cgroup.lines().find_map(|l| l.strip_prefix("0::").or_else(|| l.split(':').nth(2)))?;
-    let unit = path.split('/').rev().find(|seg| seg.ends_with(".service"))?;
+    let path = cgroup
+        .lines()
+        .find_map(|l| l.strip_prefix("0::").or_else(|| l.split(':').nth(2)))?;
+    let unit = path
+        .split('/')
+        .rev()
+        .find(|seg| seg.ends_with(".service"))?;
     if unit.starts_with("user@") {
         return None;
     }
@@ -425,7 +556,11 @@ fn systemd_owner(cgroup: &str, exec_start: impl Fn(&str, bool) -> String) -> Opt
         return None;
     }
     let unit = unit.to_string();
-    Some(if user { Owner::SystemdUser { unit } } else { Owner::SystemdSystem { unit } })
+    Some(if user {
+        Owner::SystemdUser { unit }
+    } else {
+        Owner::SystemdSystem { unit }
+    })
 }
 
 #[cfg(test)]
@@ -434,7 +569,9 @@ mod tests {
 
     #[test]
     fn launchctl_list_maps_pids_to_labels() {
-        let jobs = parse_launchctl_list("PID\tStatus\tLabel\n-\t0\tcom.t3code.update\n823\t0\tcom.t3code.daemon\n");
+        let jobs = parse_launchctl_list(
+            "PID\tStatus\tLabel\n-\t0\tcom.t3code.update\n823\t0\tcom.t3code.daemon\n",
+        );
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[&823], "com.t3code.daemon");
     }
@@ -450,7 +587,11 @@ mod tests {
         .into();
         let argv = |pid: u64| -> Vec<String> {
             match pid {
-                823 => vec!["/opt/homebrew/bin/node".into(), "/opt/homebrew/bin/t3".into(), "serve".into()],
+                823 => vec![
+                    "/opt/homebrew/bin/node".into(),
+                    "/opt/homebrew/bin/t3".into(),
+                    "serve".into(),
+                ],
                 900 => vec!["/Applications/Term.app/Contents/MacOS/term".into()],
                 _ => vec![],
             }
@@ -473,52 +614,101 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let plist = dir.path().join("com.t3code.daemon.plist");
         std::fs::write(&plist, "").unwrap();
-        let text = format!("gui/501/com.t3code.daemon = {{\n\tactive count = 1\n\tpath = {}\n\ttype = LaunchAgent\n", plist.display());
+        let text = format!(
+            "gui/501/com.t3code.daemon = {{\n\tactive count = 1\n\tpath = {}\n\ttype = LaunchAgent\n",
+            plist.display()
+        );
         assert_eq!(parse_launchctl_print_path(&text), Some(plist));
-        assert_eq!(parse_launchctl_print_path("path = (submitted by launchctl)"), None);
-        assert_eq!(parse_launchctl_print_path("path = /nowhere/gone.plist"), None);
+        assert_eq!(
+            parse_launchctl_print_path("path = (submitted by launchctl)"),
+            None
+        );
+        assert_eq!(
+            parse_launchctl_print_path("path = /nowhere/gone.plist"),
+            None
+        );
     }
 
     #[test]
     fn systemd_units_need_a_t3_command() {
-        let exec = |unit: &str, _user: bool| match unit {
+        let exec = |unit: &str, _user: bool| {
+            match unit {
             "t3code.service" | "t3-code.service" => "{ path=/usr/bin/t3 ; argv[]=/usr/bin/t3 serve ; }".to_string(),
             _ => "{ path=/usr/libexec/gnome-terminal-server ; argv[]=/usr/libexec/gnome-terminal-server ; }".to_string(),
+        }
         };
         assert_eq!(
-            systemd_owner("0::/user.slice/user-1000.slice/user@1000.service/app.slice/t3code.service\n", exec),
-            Some(Owner::SystemdUser { unit: "t3code.service".into() })
+            systemd_owner(
+                "0::/user.slice/user-1000.slice/user@1000.service/app.slice/t3code.service\n",
+                exec
+            ),
+            Some(Owner::SystemdUser {
+                unit: "t3code.service".into()
+            })
         );
         assert_eq!(
             systemd_owner("0::/system.slice/t3-code.service\n", exec),
-            Some(Owner::SystemdSystem { unit: "t3-code.service".into() })
+            Some(Owner::SystemdSystem {
+                unit: "t3-code.service".into()
+            })
         );
         // A server typed into a terminal that runs as a user service.
         assert_eq!(
-            systemd_owner("0::/user.slice/user-1000.slice/user@1000.service/app.slice/gnome-terminal-server.service\n", exec),
+            systemd_owner(
+                "0::/user.slice/user-1000.slice/user@1000.service/app.slice/gnome-terminal-server.service\n",
+                exec
+            ),
             None
         );
         assert_eq!(
-            systemd_owner("0::/user.slice/user-1000.slice/user@1000.service/app.slice/project3-terminal.service\n", exec),
+            systemd_owner(
+                "0::/user.slice/user-1000.slice/user@1000.service/app.slice/project3-terminal.service\n",
+                exec
+            ),
             None
         );
-        assert_eq!(systemd_owner("0::/user.slice/user-1000.slice/session-2.scope\n", exec), None);
+        assert_eq!(
+            systemd_owner("0::/user.slice/user-1000.slice/session-2.scope\n", exec),
+            None
+        );
     }
 
     #[test]
     fn t3_launchers() {
         assert!(is_t3_launcher(&["node", "/opt/homebrew/bin/t3", "serve"]));
-        assert!(is_t3_launcher(&["/x/T3 Code.app/Contents/MacOS/T3 Code", "/x/app.asar/apps/server/dist/bin.mjs"]));
-        assert!(is_t3_launcher(&["C:\\Users\\me\\AppData\\Roaming\\npm\\t3.cmd", "serve"]));
+        assert!(is_t3_launcher(&[
+            "/x/T3 Code.app/Contents/MacOS/T3 Code",
+            "/x/app.asar/apps/server/dist/bin.mjs"
+        ]));
+        assert!(is_t3_launcher(&[
+            "C:\\Users\\me\\AppData\\Roaming\\npm\\t3.cmd",
+            "serve"
+        ]));
         assert!(!is_t3_launcher(&["/usr/bin/zsh", "-l"]));
         assert!(!is_t3_launcher(&["/opt/t3x/bin/server"]));
     }
 
     #[test]
     fn restart_keeps_jobs_that_fail_to_start() {
-        let mut restart = Restart { jobs: vec![Owner::App] };
+        let mut restart = Restart {
+            jobs: vec![Owner::App],
+        };
         let results = restart.run();
         assert!(results[0].is_err());
+        assert!(!restart.is_empty());
+    }
+
+    #[test]
+    fn restart_panic_keeps_pending_jobs() {
+        let mut restart = Restart {
+            jobs: vec![Owner::App],
+        };
+        let before = restart.names();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            restart.run_with(|_| panic!("restart panic"));
+        }));
+        assert!(result.is_err());
+        assert_eq!(restart.names(), before);
         assert!(!restart.is_empty());
     }
 
@@ -528,7 +718,8 @@ mod tests {
             return;
         }
         let start = Instant::now();
-        let err = output_timeout(Command::new("sleep").arg("30"), Duration::from_millis(300)).unwrap_err();
+        let err = output_timeout(Command::new("sleep").arg("30"), Duration::from_millis(300))
+            .unwrap_err();
         assert!(err.to_string().contains("didn't finish"));
         assert!(start.elapsed() < Duration::from_secs(5));
     }

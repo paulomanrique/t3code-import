@@ -18,7 +18,7 @@ use std::path::PathBuf;
 
 use crate::model::{Provider, Transcript};
 
-pub use guard::{GuardFinding, GuardReport};
+pub use guard::GuardReport;
 pub use home::T3Home;
 pub use placement::{Placement, resolve_placement};
 

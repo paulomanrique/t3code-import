@@ -1,4 +1,4 @@
-//! Provider-neutral session model shared by the scanners, the TUI and the writer.
+//! Provider-neutral session model shared by the scanners, the GUI and the writer.
 
 use std::path::PathBuf;
 
@@ -15,7 +15,12 @@ pub enum Provider {
 }
 
 impl Provider {
-    pub const ALL: [Provider; 4] = [Provider::Claude, Provider::Codex, Provider::Grok, Provider::OpenCode];
+    pub const ALL: [Provider; 4] = [
+        Provider::Claude,
+        Provider::Codex,
+        Provider::Grok,
+        Provider::OpenCode,
+    ];
 
     /// T3 Code driver kind (`ProviderDriverKind`).
     pub fn driver(self) -> &'static str {

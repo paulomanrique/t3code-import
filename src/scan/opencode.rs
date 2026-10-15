@@ -55,6 +55,26 @@ impl Scanner for OpenCodeScanner {
     }
 }
 
+#[cfg(feature = "gui")]
+pub(crate) fn child_count(root: &Path, summary: &SessionSummary) -> anyhow::Result<usize> {
+    const UNKNOWN: &str = "can't tell whether it has sub-agent sessions; delete it from OpenCode";
+    anyhow::ensure!(
+        summary.source.file_name().and_then(|n| n.to_str()) == Some("opencode.db"),
+        "{UNKNOWN}"
+    );
+    let path = db_path(root).context(UNKNOWN)?;
+    let db = snapshot_db(&path).context(UNKNOWN)?;
+    let conn = db.connection();
+    anyhow::ensure!(columns(conn, "session").contains("parent_id"), "{UNKNOWN}");
+    conn.query_row(
+        "SELECT COUNT(*) FROM session WHERE parent_id = ?1",
+        [&summary.session_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .context(UNKNOWN)
+    .and_then(|count| usize::try_from(count).context(UNKNOWN))
+}
+
 fn db_path(root: &Path) -> Option<PathBuf> {
     let path = root.join("opencode.db");
     path.is_file().then_some(path)

@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>t3-import</title>
+<link rel="stylesheet" href="app.css">
+<script src="vendor/marked.min.js"></script>
+<script src="vendor/purify.min.js"></script>
+<script type="module" src="app.js"></script>
+</head>
+<body>
+<header class="bar">
+  <div class="brand">
+    <strong>t3-import</strong>
+    <span id="t3-status" class="t3-status">Reading T3 Code…</span>
+  </div>
+  <div class="bar-tools">
+    <div class="providers" id="providers" role="group" aria-label="Show sessions from"></div>
+    <label class="switch"><input type="checkbox" id="show-in-t3"><span>Show threads already in T3</span></label>
+    <input type="search" id="search" placeholder="Search titles, folders, ids" autocomplete="off" spellcheck="false">
+  </div>
+</header>
+
+<div class="banner" id="banner" hidden></div>
+<main class="panes" id="panes">
+  <nav class="pane tree-pane" aria-label="Folders">
+    <div class="tree" id="tree"></div>
+  </nav>
+  <div class="splitter" data-split="tree" role="separator" aria-orientation="vertical"></div>
+
+  <section class="pane list-pane" aria-label="Threads">
+    <div class="folder-head" id="folder-head"></div>
+    <div class="list-tools">
+      <label class="check-all"><input type="checkbox" id="check-all"><span id="check-all-label">Select all</span></label>
+      <span class="selection-note" id="selection-note"></span>
+      <div class="actions">
+        <button type="button" id="act-trash" class="btn quiet-danger" disabled>Delete</button>
+        <button type="button" id="act-import" class="btn primary" disabled>Add to T3</button>
+      </div>
+    </div>
+    <ul class="threads" id="threads" role="listbox" aria-multiselectable="true" tabindex="0"></ul>
+  </section>
+  <div class="splitter" data-split="list" role="separator" aria-orientation="vertical"></div>
+
+  <section class="pane reader" id="reader" aria-label="Conversation"></section>
+</main>
+
+<dialog id="dialog"></dialog>
+</body>
+</html>
