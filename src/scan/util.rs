@@ -43,8 +43,14 @@ pub(super) fn clean_recorded_title(value: &str) -> Option<String> {
 }
 
 /// First line of a real user message, trimmed to [`TITLE_CHARS`] characters.
+/// Attached-image markers (`<image name=… path=…>`, `</image>`) are skipped, so a
+/// prompt that starts with a pasted screenshot is titled by its text.
 pub(super) fn title_from_text(text: &str) -> String {
-    let line = text.trim().lines().next().unwrap_or("").trim();
+    let line = text
+        .lines()
+        .map(strip_image_tags)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
     let trimmed: String = line.chars().take(TITLE_CHARS).collect();
     let trimmed = trimmed.trim();
     if trimmed.is_empty() {
@@ -52,6 +58,37 @@ pub(super) fn title_from_text(text: &str) -> String {
     } else {
         trimmed.to_string()
     }
+}
+
+/// Removes complete `<image …>` and `</image>` markers. Other text that merely
+/// starts with "<image" (`<images>`, `<imageProcessing>`, a stray `<image`) stays.
+fn strip_image_tags(line: &str) -> String {
+    let mut out = String::new();
+    let mut rest = line;
+    while let Some(start) = rest.find('<') {
+        let tail = &rest[start..];
+        let marker_len = if tail.starts_with("</image>") {
+            Some("</image>".len())
+        } else if tail.starts_with("<image")
+            && tail[6..].starts_with(|c: char| c == '>' || c.is_whitespace())
+        {
+            tail.find('>').map(|end| end + 1)
+        } else {
+            None
+        };
+        match marker_len {
+            Some(len) => {
+                out.push_str(&rest[..start]);
+                rest = &rest[start + len..];
+            }
+            None => {
+                out.push_str(&rest[..start + 1]);
+                rest = &rest[start + 1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out.trim().to_string()
 }
 
 pub(super) fn parse_rfc3339(value: &str) -> Option<DateTime<Utc>> {
@@ -208,5 +245,16 @@ mod tests {
             unix_to_utc(1_700_000_000_123_456),
             DateTime::from_timestamp(1_700_000_000, 123_456_000).unwrap()
         );
+    }
+
+    #[test]
+    fn title_skips_attached_image_markers() {
+        let text = "<image name=[Image #1] path=\"/var/folders/x/shot.png\">\n</image>\nWhy is this button red?";
+        assert_eq!(title_from_text(text), "Why is this button red?");
+        assert_eq!(title_from_text("see <image name=[Image #2]> here"), "see  here");
+        assert_eq!(title_from_text("<image name=[Image #1]>"), "Untitled");
+        assert_eq!(title_from_text("<images> are listed"), "<images> are listed");
+        assert_eq!(title_from_text("fix <imageProcessing> lag"), "fix <imageProcessing> lag");
+        assert_eq!(title_from_text("broken <image name=x"), "broken <image name=x");
     }
 }

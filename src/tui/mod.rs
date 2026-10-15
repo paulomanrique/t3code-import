@@ -39,5 +39,13 @@ pub fn run(roots: Roots, t3_home: Option<PathBuf>) -> anyhow::Result<()> {
         }
     })();
     ratatui::restore();
+    // Leaving after closing T3 but before importing: put its service back.
+    let mut restart = app.take_restart();
+    for line in restart.run() {
+        match line {
+            Ok(done) => eprintln!("{done}"),
+            Err(failed) => eprintln!("warning: {failed}"),
+        }
+    }
     result
 }

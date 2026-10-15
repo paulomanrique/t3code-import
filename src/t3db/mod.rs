@@ -4,6 +4,7 @@
 //! produces through `EventSink.write`, minus its limits. Nothing is written unless
 //! [`guard`] accepts the database first.
 
+pub mod control;
 pub mod guard;
 pub mod home;
 mod payload;

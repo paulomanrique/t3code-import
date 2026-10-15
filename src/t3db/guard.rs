@@ -103,12 +103,94 @@ fn normalized(sql: &str) -> String {
     result
 }
 
+/// True for a non-unique index whose keys are plain columns and whose filter, if
+/// any, is `column = literal` joined by AND. Building such an index entry can't
+/// fail, so it can't reject a row. Anything with an expression (in the keys or
+/// the filter) could raise an error on insert, so it isn't accepted blindly.
+fn harmless_index(db: &Connection, name: &str, normalized_sql: &str) -> bool {
+    let columns_only = db
+        .prepare(&format!("PRAGMA index_xinfo(\"{}\")", name.replace('"', "\"\"")))
+        .and_then(|mut stmt| {
+            stmt.query_map([], |r| Ok((r.get::<_, i64>(1)?, r.get::<_, i64>(5)?)))?
+                .collect::<rusqlite::Result<Vec<(i64, i64)>>>()
+        })
+        // cid -2 is an expression; key = 1 marks the indexed terms (rowid is cid -1, key 0).
+        .is_ok_and(|cols| !cols.is_empty() && cols.iter().all(|&(cid, key)| key == 0 || cid >= 0));
+    columns_only && simple_filter(normalized_sql)
+}
+
+/// The text after the column list is empty or `where a='x' and b=2 …`.
+fn simple_filter(sql: &str) -> bool {
+    let Some(open) = sql.find(" on ").and_then(|on| sql[on..].find('(').map(|i| on + i)) else {
+        return false;
+    };
+    let Some(close) = sql[open..].find(')').map(|i| open + i) else {
+        return false;
+    };
+    let rest = sql[close + 1..].trim();
+    if rest.is_empty() {
+        return true;
+    }
+    let Some(mut rest) = rest.strip_prefix("where") else {
+        return false;
+    };
+    loop {
+        rest = rest.trim_start();
+        let ident = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').count();
+        if ident == 0 {
+            return false;
+        }
+        rest = rest[ident..].trim_start();
+        let Some(r) = rest.strip_prefix('=') else {
+            return false;
+        };
+        rest = r.trim_start();
+        if let Some(r) = rest.strip_prefix('\'') {
+            // A string literal; '' is an escaped quote.
+            let mut chars = r.char_indices().peekable();
+            let mut end = None;
+            while let Some((i, c)) = chars.next() {
+                if c == '\'' {
+                    if chars.peek().is_some_and(|&(_, n)| n == '\'') {
+                        chars.next();
+                    } else {
+                        end = Some(i);
+                        break;
+                    }
+                }
+            }
+            let Some(end) = end else {
+                return false;
+            };
+            rest = &r[end + 1..];
+        } else {
+            let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+            if digits == 0 {
+                return false;
+            }
+            rest = &rest[digits..];
+        }
+        rest = rest.trim_start();
+        if rest.is_empty() {
+            return true;
+        }
+        match rest.strip_prefix("and") {
+            Some(r) => rest = r,
+            None => return false,
+        }
+    }
+}
+
 pub(super) fn running(home: &T3Home) -> anyhow::Result<Vec<String>> {
     #[cfg(test)]
     if let Some(inventory) = TEST_PROCESSES.with(|v| v.borrow().clone()) {
         return Ok(inventory);
     }
-    let processes = System::new_all();
+    Ok(running_pids(home, &System::new_all())?.into_values().collect())
+}
+
+/// PIDs of T3 processes using `home`, with a description safe to show.
+pub(super) fn running_pids(home: &T3Home, processes: &System) -> anyhow::Result<BTreeMap<u64, String>> {
     let mut found = BTreeMap::new();
     for path in [
         home.userdata().join("server-runtime.json"),
@@ -158,12 +240,32 @@ pub(super) fn running(home: &T3Home) -> anyhow::Result<Vec<String>> {
             });
         }
     }
-    Ok(found.into_values().collect())
+    Ok(found)
+}
+
+/// T3 processes for `home` recognised by their executable and arguments, with
+/// their start time. Unlike [`running_pids`], a PID that only appears in
+/// server-runtime.json is not included: that file can be stale and its PID reused,
+/// so it may block an import but never justifies stopping a process.
+pub(super) fn t3_processes(home: &T3Home, processes: &System) -> BTreeMap<u64, u64> {
+    let default_home = dirs::home_dir()
+        .map(|p| p.join(".t3"))
+        .map(|p| p.canonicalize().unwrap_or(p));
+    processes
+        .processes()
+        .iter()
+        .filter(|(pid, _)| pid.as_u32() != std::process::id())
+        .filter(|(_, process)| {
+            let argv: Vec<String> = process.cmd().iter().map(|s| s.to_string_lossy().into_owned()).collect();
+            process_for_home(process.exe(), &argv, home, default_home.as_deref())
+        })
+        .map(|(pid, process)| (u64::from(pid.as_u32()), process.start_time()))
+        .collect()
 }
 
 /// Custom T3CODE_HOME environments without --base-dir are detected only through
 /// server-runtime.json: process environments are not read by this inventory.
-fn process_for_home(
+pub(super) fn process_for_home(
     exe: Option<&std::path::Path>,
     argv: &[String],
     home: &T3Home,
@@ -294,13 +396,37 @@ pub(super) fn check_connection(home: &T3Home, db: &Connection) -> anyhow::Result
         .chain(actual.keys())
         .collect::<std::collections::BTreeSet<_>>()
     {
-        if expected.get(name) != actual.get(name) {
-            report.findings.push(GuardFinding {
-                location: format!("sqlite_master.{name}"),
-                expected: format!("{:?}", expected.get(name)),
-                actual: format!("{:?}", actual.get(name)),
-            });
+        let (want, have) = (expected.get(name), actual.get(name));
+        if want == have {
+            continue;
         }
+        // A plain index only speeds up T3's reads, and T3 nightlies add them often.
+        // Dropping one can't affect writes. A new one passes when it can't make an
+        // INSERT fail either: plain columns, at most an equality filter (see
+        // `harmless_index`). Expression indexes, unique indexes, tables and
+        // triggers still stop the import.
+        let plain_index = |o: &(String, String, String)| o.0 == "index" && o.2.starts_with("create index ");
+        match (want, have) {
+            (None, Some(new)) if plain_index(new) && harmless_index(db, name, &new.2) => {
+                report.warnings.push(format!("T3 added an index this version doesn't know yet: {name} on {}", new.1));
+                continue;
+            }
+            (Some(old), None) if plain_index(old) => {
+                report.warnings.push(format!("T3 dropped an index: {name} on {}", old.1));
+                continue;
+            }
+            _ => {}
+        }
+        let describe = |o: Option<&(String, String, String)>| match o {
+            Some((kind, table, sql)) if sql.is_empty() => format!("{kind} on {table}"),
+            Some((_, _, sql)) => sql.clone(),
+            None => "nothing".to_string(),
+        };
+        report.findings.push(GuardFinding {
+            location: format!("sqlite_master.{name}"),
+            expected: describe(want),
+            actual: describe(have),
+        });
     }
     if report.findings.is_empty() {
         let version: Option<i64> = db.query_row("SELECT schema_version FROM orchestration_v2_projection_metadata WHERE projection_name='thread-projections'", [], |r| r.get(0)).optional()?;
@@ -772,5 +898,36 @@ mod process_tests {
         std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700))?;
         assert_eq!(t3_version(&home), "fixture-version");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod index_tests {
+    use super::*;
+
+    fn tolerated(ddl: &str, name: &str) -> bool {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE t(a TEXT, b TEXT, c INTEGER);").unwrap();
+        db.execute_batch(ddl).unwrap();
+        let sql: String =
+            db.query_row("SELECT sql FROM sqlite_master WHERE name=?1", [name], |r| r.get(0)).unwrap();
+        harmless_index(&db, name, &normalized(&sql))
+    }
+
+    #[test]
+    fn only_column_indexes_with_equality_filters_pass() {
+        assert!(tolerated("CREATE INDEX i ON t(a, b DESC)", "i"));
+        assert!(tolerated("CREATE INDEX i ON t(a) WHERE b = 'x' AND c = 2", "i"));
+        assert!(tolerated("CREATE INDEX i ON t(a) WHERE b = 'it''s and more'", "i"));
+        // The index T3 0.0.46 added.
+        assert!(tolerated(
+            "CREATE INDEX i ON t(a, b DESC, c DESC)\n    WHERE a = 'error' AND b = 'failed'\n",
+            "i"
+        ));
+        // Expressions can raise errors on insert.
+        assert!(!tolerated("CREATE INDEX i ON t(abs(c))", "i"));
+        assert!(!tolerated("CREATE INDEX i ON t(a) WHERE abs(c) > 0", "i"));
+        assert!(!tolerated("CREATE INDEX i ON t(a) WHERE b = 'x' OR c = 1", "i"));
+        assert!(!tolerated("CREATE INDEX i ON t(a) WHERE b > 'x'", "i"));
     }
 }

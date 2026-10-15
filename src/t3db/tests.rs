@@ -389,8 +389,25 @@ fn structure_and_payload_drift_fail_closed() -> anyhow::Result<()> {
         "ALTER TABLE orchestration_v2_projection_messages DROP COLUMN surprise",
         [],
     )?;
+    // A plain index can't affect what gets written: noted, not blocking.
     db.execute(
-        "CREATE INDEX synthetic_drift_index ON orchestration_v2_projection_messages(role)",
+        "CREATE INDEX synthetic_plain_index ON orchestration_v2_projection_messages(role) WHERE role = 'user'",
+        [],
+    )?;
+    let report = check(&home)?;
+    assert!(report.ok(), "{}", findings(&report));
+    assert!(report.warnings.iter().any(|w| w.contains("synthetic_plain_index")));
+    db.execute("DROP INDEX synthetic_plain_index", [])?;
+    db.execute(
+        "DROP INDEX orchestration_v2_projection_turn_items_failed_error_idx",
+        [],
+    )?;
+    let report = check(&home)?;
+    assert!(report.ok(), "{}", findings(&report));
+    assert!(report.warnings.iter().any(|w| w.contains("dropped") && w.contains("failed_error_idx")));
+    // A unique index can reject rows, so it stops the import.
+    db.execute(
+        "CREATE UNIQUE INDEX synthetic_drift_index ON orchestration_v2_projection_messages(role, message_id)",
         [],
     )?;
     assert!(

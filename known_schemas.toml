@@ -1,4 +1,5 @@
-# Captured read-only from statev2.sqlite, 2026-10-09. Includes implicit indexes.
+# Captured read-only from statev2.sqlite, 2026-10-09; updated 2026-10-14 for
+# T3 0.0.46-nightly.20261014. Includes implicit indexes.
 
 [[objects]]
 type = "index"
@@ -155,6 +156,12 @@ type = "table"
 name = "orchestration_v2_projection_turn_items"
 tbl_name = "orchestration_v2_projection_turn_items"
 sql = "CREATE TABLE orchestration_v2_projection_turn_items (\n      turn_item_id TEXT PRIMARY KEY,\n      thread_id TEXT NOT NULL,\n      run_id TEXT,\n      node_id TEXT,\n      provider_thread_id TEXT,\n      provider_turn_id TEXT,\n      parent_item_id TEXT,\n      ordinal INTEGER NOT NULL,\n      type TEXT NOT NULL,\n      status TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      payload_json TEXT NOT NULL\n    )"
+
+[[objects]]
+type = "index"
+name = "orchestration_v2_projection_turn_items_failed_error_idx"
+tbl_name = "orchestration_v2_projection_turn_items"
+sql = "CREATE INDEX orchestration_v2_projection_turn_items_failed_error_idx\n    ON orchestration_v2_projection_turn_items(\n      thread_id, run_id, node_id, updated_at DESC, ordinal DESC, turn_item_id DESC\n    )\n    WHERE type = 'error' AND status = 'failed'\n  "
 
 [[objects]]
 type = "index"

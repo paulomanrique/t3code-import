@@ -39,6 +39,10 @@ enum Command {
         max_messages: Option<usize>,
         #[arg(long)]
         dry_run: bool,
+        /// Close T3 first if it's running, and start its background service
+        /// again when the import is done.
+        #[arg(long)]
+        close_t3: bool,
     },
 }
 
@@ -68,13 +72,13 @@ fn main() -> anyhow::Result<()> {
         Some(Command::Check) => {
             let home = t3db::T3Home::detect(cli.t3_home)?;
             let report = t3db::check(&home)?;
-            print_guard(&report);
+            print_guard(&home, &report);
             if !report.ok() {
                 std::process::exit(2);
             }
             Ok(())
         }
-        Some(Command::Import { sessions, max_messages, dry_run }) => {
+        Some(Command::Import { sessions, max_messages, dry_run, close_t3 }) => {
             let home = t3db::T3Home::detect(cli.t3_home)?;
             let snapshot = t3db::snapshot(&home)?;
             let all = scan_all(&roots);
@@ -95,8 +99,24 @@ fn main() -> anyhow::Result<()> {
                 requests.push(request_for(&roots, &snapshot, summary)?);
             }
             let options = t3db::ImportOptions { max_messages, dry_run };
-            let report = t3db::import(&home, requests, &options, &mut |p| eprintln!("{p:?}"))?;
-            print_report(&report);
+            // A dry run writes nothing, so it never needs T3 closed.
+            let mut restart = if close_t3 && !dry_run {
+                let running = t3db::control::find(&home)?;
+                for r in &running {
+                    eprintln!("Closing the {}: {}", r.name(), r.plan());
+                }
+                t3db::control::close(&home, &running)?
+            } else {
+                t3db::control::Restart::default()
+            };
+            let result = t3db::import(&home, requests, &options, &mut |p| eprintln!("{p:?}"));
+            for line in restart.run() {
+                match line {
+                    Ok(done) => eprintln!("{done}"),
+                    Err(failed) => eprintln!("warning: {failed}"),
+                }
+            }
+            print_report(&result?);
             Ok(())
         }
     }
@@ -143,9 +163,17 @@ fn parse_provider(s: &str) -> anyhow::Result<Provider> {
         .map_or_else(|| bail!("unknown provider: {s}"), Ok)
 }
 
-pub fn print_guard(report: &t3db::GuardReport) {
-    for p in &report.t3_running {
-        println!("T3 is running: {p}");
+pub fn print_guard(home: &t3db::T3Home, report: &t3db::GuardReport) {
+    if !report.t3_running.is_empty() {
+        match t3db::control::find(home) {
+            Ok(running) if !running.is_empty() => {
+                for r in &running {
+                    println!("T3 is running: the {}", r.name());
+                }
+            }
+            _ => report.t3_running.iter().for_each(|p| println!("T3 is running: {p}")),
+        }
+        println!("Close it, or let `t3-import import --close-t3 …` close it and start it again afterwards.");
     }
     for f in &report.findings {
         println!("schema mismatch at {}: expected {}, found {}", f.location, f.expected, f.actual);
