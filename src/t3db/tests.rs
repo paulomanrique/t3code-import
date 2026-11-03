@@ -24,8 +24,9 @@ fn database_copy() -> anyhow::Result<Option<(tempfile::TempDir, T3Home)>> {
     let home = T3Home::detect(Some(dir.path().into()))?;
     Ok(Some((dir, home)))
 }
-// The fixture uses the exact guarded DDL, with only the read-only project catalog
-// added separately (T3's project projection is outside the guarded thread schema).
+// The fixture uses the exact guarded DDL, with only the read-only project catalog and
+// the message search table added separately (both are outside the guarded thread
+// schema; the guarded message triggers fill the search table).
 fn fixture_database() -> anyhow::Result<(tempfile::TempDir, T3Home)> {
     let dir = tempfile::tempdir()?;
     std::fs::create_dir(dir.path().join("userdata"))?;
@@ -33,9 +34,10 @@ fn fixture_database() -> anyhow::Result<(tempfile::TempDir, T3Home)> {
         base: dir.path().canonicalize()?,
     };
     let db = Connection::open(home.db_path())?;
+    db.execute_batch("CREATE VIRTUAL TABLE orchestration_v2_message_search USING fts5(text, content = '', contentless_delete = 1, tokenize = 'trigram remove_diacritics 1')")?;
     let known: toml::Value = toml::from_str(include_str!("../../known_schemas.toml"))?;
     let objects = known["objects"].as_array().unwrap();
-    for kind in ["table", "index"] {
+    for kind in ["table", "index", "trigger"] {
         for object in objects {
             let sql = object["sql"].as_str().unwrap();
             if object["type"].as_str() == Some(kind) && !sql.is_empty() {
@@ -88,6 +90,79 @@ fn reproducible_fixture_imports_without_installed_t3() -> anyhow::Result<()> {
     let again = import(&home, vec![req], &ImportOptions::default(), &mut |_| {})?;
     assert!(again.imported.is_empty());
     assert_eq!(again.skipped.len(), 1);
+    Ok(())
+}
+#[test]
+fn imported_messages_reach_t3_search() -> anyhow::Result<()> {
+    let _closed = ClosedInventory::new();
+    let (_dir, home) = fixture_database()?;
+    let req = request(&home, Provider::Grok, "search-import")?;
+    let id = thread_id_for("grok", "search-import");
+    let report = import(&home, vec![req], &ImportOptions::default(), &mut |_| {})?;
+    assert_eq!(report.imported, vec![id.clone()]);
+    // T3 0.1.6's message triggers index each row by rowid, the same as for messages T3 writes.
+    let db = Connection::open(home.db_path())?;
+    let mut stmt = db.prepare(
+        "SELECT role FROM orchestration_v2_projection_messages WHERE thread_id=?1 AND rowid IN
+            (SELECT rowid FROM orchestration_v2_message_search WHERE orchestration_v2_message_search MATCH '\"synthetic\"')
+         ORDER BY role",
+    )?;
+    let roles = stmt
+        .query_map([&id], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    assert_eq!(roles, ["assistant", "user"]);
+    Ok(())
+}
+#[test]
+fn guard_accepts_t3_0_1_6_payload_fields() -> anyhow::Result<()> {
+    let _closed = ClosedInventory::new();
+    let (_dir, home) = fixture_database()?;
+    let db = Connection::open(home.db_path())?;
+    // Shapes T3 0.1.6 stores: a thread's open history, a Claude attachment budget,
+    // and transcript inodes as a string (new) and a number (older rows).
+    db.execute_batch(r#"
+        UPDATE orchestration_v2_projection_threads SET payload_json=json_set(payload_json,'$.opens',json('{"openedAt":1793717282099,"score":1.5,"picks":[{"query":"abc","at":1793717282099}]}'));
+        UPDATE orchestration_v2_projection_provider_threads SET payload_json=json_set(payload_json,'$.nativeMetadata',json('{"claudeAttachmentBudget":{"bytesUsed":151367,"pagesUsed":0}}'));
+        UPDATE provider_session_runtime SET runtime_payload_json=json_insert(
+            json_set(runtime_payload_json,'$.importedTranscripts[0].inode','12345678901234567890'),
+            '$.importedTranscripts[#]',
+            json_set(json_extract(runtime_payload_json,'$.importedTranscripts[0]'),'$.inode',42,'$.providerSessionId','numeric-inode'));
+    "#)?;
+    let report = check(&home)?;
+    assert!(report.ok(), "{}", findings(&report));
+    // T3 reads a malformed `opens` as null, so it can't block an import either.
+    db.execute("UPDATE orchestration_v2_projection_threads SET payload_json=json_set(payload_json,'$.opens','not an object')", [])?;
+    let report = check(&home)?;
+    assert!(report.ok(), "{}", findings(&report));
+    // The budget is a strict struct of non-negative integers in T3.
+    db.execute("UPDATE orchestration_v2_projection_provider_threads SET payload_json=json_set(payload_json,'$.nativeMetadata.claudeAttachmentBudget.bytesUsed',-1)", [])?;
+    assert!(
+        check(&home)?
+            .findings
+            .iter()
+            .any(|f| f.location.starts_with("orchestration_v2_projection_provider_threads"))
+    );
+    Ok(())
+}
+#[cfg(unix)]
+#[test]
+fn imported_inode_is_a_string_like_t3_writes() -> anyhow::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let _closed = ClosedInventory::new();
+    let (_dir, home) = fixture_database()?;
+    let req = request(&home, Provider::Codex, "inode-string")?;
+    let inode = std::fs::metadata(&req.transcript.summary.source)?.ino();
+    import(&home, vec![req], &ImportOptions::default(), &mut |_| {})?;
+    let raw: String = Connection::open(home.db_path())?.query_row(
+        "SELECT runtime_payload_json FROM provider_session_runtime WHERE thread_id=?",
+        [thread_id_for("codex", "inode-string")],
+        |r| r.get(0),
+    )?;
+    let runtime: Value = serde_json::from_str(&raw)?;
+    assert_eq!(
+        runtime["importedTranscripts"][0]["inode"],
+        json!(inode.to_string())
+    );
     Ok(())
 }
 fn no_database() -> anyhow::Result<()> {
@@ -493,6 +568,28 @@ fn structure_and_payload_drift_fail_closed() -> anyhow::Result<()> {
             .any(|f| f.location == "sqlite_master.synthetic_drift_index")
     );
     db.execute("DROP INDEX synthetic_drift_index", [])?;
+    // A trigger runs on every write, so an unknown one stops the import, and so
+    // does a missing search trigger.
+    db.execute_batch("CREATE TRIGGER synthetic_drift_trigger AFTER INSERT ON orchestration_v2_projection_messages BEGIN SELECT 1; END")?;
+    assert!(
+        check(&home)?
+            .findings
+            .iter()
+            .any(|f| f.location == "sqlite_master.synthetic_drift_trigger")
+    );
+    let search_insert: String = db.query_row(
+        "SELECT sql FROM sqlite_master WHERE name='orchestration_v2_message_search_insert'",
+        [],
+        |r| r.get(0),
+    )?;
+    db.execute_batch("DROP TRIGGER synthetic_drift_trigger; DROP TRIGGER orchestration_v2_message_search_insert")?;
+    assert!(
+        check(&home)?
+            .findings
+            .iter()
+            .any(|f| f.location == "sqlite_master.orchestration_v2_message_search_insert")
+    );
+    db.execute_batch(&search_insert)?;
     db.execute("UPDATE orchestration_v2_projection_threads SET updated_at='2099-01-01T00:00:00.000Z',payload_json=json_set(payload_json,'$.unexpectedFutureKey','PRIVATE-THREAD-CONTENT') WHERE thread_id=(SELECT thread_id FROM orchestration_v2_projection_threads LIMIT 1)",[])?;
     let report = check(&home)?;
     assert!(!report.ok());

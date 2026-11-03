@@ -910,13 +910,14 @@ fn source_identity(r: &ImportRequest) -> anyhow::Result<Value> {
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_millis() as u64)
     };
+    // T3 writes the inode as a string, which keeps it exact beyond 2^53.
     #[cfg(unix)]
     let (device, inode) = {
         use std::os::unix::fs::MetadataExt;
-        (meta.dev(), Some(meta.ino()))
+        (meta.dev(), Some(meta.ino().to_string()))
     };
     #[cfg(not(unix))]
-    let (device, inode): (u64, Option<u64>) = (0, None);
+    let (device, inode): (u64, Option<String>) = (0, None);
     Ok(
         json!({"provider":s.provider.driver(),"providerInstanceId":r.provider_instance_id,"providerSessionId":s.session_id,"filePath":s.source,"size":meta.len(),"mtimeMs":millis(meta.modified()),"device":device,"inode":inode,"birthtimeMs":millis(meta.created())}),
     )

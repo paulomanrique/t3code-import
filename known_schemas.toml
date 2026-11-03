@@ -1,5 +1,5 @@
 # Captured read-only from statev2.sqlite, 2026-10-09; updated 2026-10-14 for
-# T3 0.0.46-nightly.20261014. Includes implicit indexes.
+# T3 0.0.46-nightly.20261014 and 2026-11-03 for T3 0.1.6. Includes implicit indexes.
 
 [[objects]]
 type = "index"
@@ -72,6 +72,24 @@ type = "index"
 name = "orchestration_events_v2_created_threads_idx"
 tbl_name = "orchestration_events"
 sql = "CREATE INDEX orchestration_events_v2_created_threads_idx\n    ON orchestration_events(stream_id)\n    WHERE application_event_version = 2\n      AND aggregate_kind = 'thread'\n      AND event_type = 'thread.created'\n  "
+
+[[objects]]
+type = "trigger"
+name = "orchestration_v2_message_search_delete"
+tbl_name = "orchestration_v2_projection_messages"
+sql = "CREATE TRIGGER orchestration_v2_message_search_delete\n      AFTER DELETE ON orchestration_v2_projection_messages\n      WHEN old.streaming = 0\n      BEGIN\n        DELETE FROM orchestration_v2_message_search WHERE rowid = old.rowid;\n      END"
+
+[[objects]]
+type = "trigger"
+name = "orchestration_v2_message_search_insert"
+tbl_name = "orchestration_v2_projection_messages"
+sql = "CREATE TRIGGER orchestration_v2_message_search_insert\n      AFTER INSERT ON orchestration_v2_projection_messages\n      WHEN \n  \n  new.streaming = 0\n  AND (\n    new.role = 'assistant'\n    OR (\n      new.role = 'user'\n      AND COALESCE(json_extract(new.payload_json, '$.createdBy'), 'user') = 'user'\n    )\n  )\n  AND NOT EXISTS (\n    SELECT 1 FROM orchestration_v2_projection_threads AS subagent_threads\n    WHERE subagent_threads.thread_id = new.thread_id\n      AND json_extract(subagent_threads.payload_json, '$.lineage.relationshipToParent') = 'subagent'\n  )\n\n  AND \n  CASE\n    WHEN substr(json_extract(new.payload_json, '$.text'), 1, 11) = 'Ultrathink:' COLLATE NOCASE\n      THEN ltrim(substr(json_extract(new.payload_json, '$.text'), 12), '\t\n\u000B\u000C\r \u00A0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF')\n    ELSE json_extract(new.payload_json, '$.text')\n  END COLLATE BINARY <> '[User attached one or more files without additional text. Respond using the conversation context and the attached files.]'\n\n\n      BEGIN\n        INSERT INTO orchestration_v2_message_search (rowid, text)\n        SELECT new.rowid, replace(replace(json_extract(new.payload_json, '$.text'), '\u2019', ''''), '\u2018', '''')\n        WHERE json_extract(new.payload_json, '$.text') IS NOT NULL;\n      END"
+
+[[objects]]
+type = "trigger"
+name = "orchestration_v2_message_search_update"
+tbl_name = "orchestration_v2_projection_messages"
+sql = "CREATE TRIGGER orchestration_v2_message_search_update\n      AFTER UPDATE OF payload_json, streaming, role ON orchestration_v2_projection_messages\n      WHEN (old.streaming = 0 OR new.streaming = 0)\n        AND (\n          old.streaming IS NOT new.streaming\n          OR old.role IS NOT new.role\n          OR json_extract(old.payload_json, '$.text') IS NOT json_extract(new.payload_json, '$.text')\n          OR json_extract(old.payload_json, '$.createdBy')\n            IS NOT json_extract(new.payload_json, '$.createdBy')\n        )\n      BEGIN\n        DELETE FROM orchestration_v2_message_search WHERE rowid = old.rowid AND old.streaming = 0;\n        INSERT INTO orchestration_v2_message_search (rowid, text)\n        SELECT new.rowid, replace(replace(json_extract(new.payload_json, '$.text'), '\u2019', ''''), '\u2018', '''')\n        WHERE \n  \n  new.streaming = 0\n  AND (\n    new.role = 'assistant'\n    OR (\n      new.role = 'user'\n      AND COALESCE(json_extract(new.payload_json, '$.createdBy'), 'user') = 'user'\n    )\n  )\n  AND NOT EXISTS (\n    SELECT 1 FROM orchestration_v2_projection_threads AS subagent_threads\n    WHERE subagent_threads.thread_id = new.thread_id\n      AND json_extract(subagent_threads.payload_json, '$.lineage.relationshipToParent') = 'subagent'\n  )\n\n  AND \n  CASE\n    WHEN substr(json_extract(new.payload_json, '$.text'), 1, 11) = 'Ultrathink:' COLLATE NOCASE\n      THEN ltrim(substr(json_extract(new.payload_json, '$.text'), 12), '\t\n\u000B\u000C\r \u00A0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF')\n    ELSE json_extract(new.payload_json, '$.text')\n  END COLLATE BINARY <> '[User attached one or more files without additional text. Respond using the conversation context and the attached files.]'\n\n\n          AND json_extract(new.payload_json, '$.text') IS NOT NULL;\n      END"
 
 [[objects]]
 type = "table"
@@ -159,6 +177,18 @@ sql = "CREATE TABLE orchestration_v2_projection_turn_items (\n      turn_item_id
 
 [[objects]]
 type = "index"
+name = "orchestration_v2_projection_turn_items_active_ordinal_idx"
+tbl_name = "orchestration_v2_projection_turn_items"
+sql = "CREATE INDEX orchestration_v2_projection_turn_items_active_ordinal_idx\n    ON orchestration_v2_projection_turn_items(thread_id, ordinal, turn_item_id)\n    WHERE status IN ('pending', 'running', 'waiting')\n  "
+
+[[objects]]
+type = "index"
+name = "orchestration_v2_projection_turn_items_active_run_idx"
+tbl_name = "orchestration_v2_projection_turn_items"
+sql = "CREATE INDEX orchestration_v2_projection_turn_items_active_run_idx\n    ON orchestration_v2_projection_turn_items(thread_id, run_id)\n    WHERE status IN ('pending', 'running', 'waiting')\n  "
+
+[[objects]]
+type = "index"
 name = "orchestration_v2_projection_turn_items_failed_error_idx"
 tbl_name = "orchestration_v2_projection_turn_items"
 sql = "CREATE INDEX orchestration_v2_projection_turn_items_failed_error_idx\n    ON orchestration_v2_projection_turn_items(\n      thread_id, run_id, node_id, updated_at DESC, ordinal DESC, turn_item_id DESC\n    )\n    WHERE type = 'error' AND status = 'failed'\n  "
@@ -195,6 +225,12 @@ sql = "CREATE INDEX orchestration_v2_projection_turn_items_shell_pending_idx\n  
 
 [[objects]]
 type = "index"
+name = "orchestration_v2_projection_turn_items_stop_request_idx"
+tbl_name = "orchestration_v2_projection_turn_items"
+sql = "CREATE INDEX orchestration_v2_projection_turn_items_stop_request_idx\n    ON orchestration_v2_projection_turn_items(thread_id, run_id)\n    WHERE type = 'run_interrupt_request'\n  "
+
+[[objects]]
+type = "index"
 name = "orchestration_v2_projection_turn_items_thread_ordinal_idx"
 tbl_name = "orchestration_v2_projection_turn_items"
 sql = "CREATE INDEX orchestration_v2_projection_turn_items_thread_ordinal_idx ON orchestration_v2_projection_turn_items(thread_id, ordinal, turn_item_id)"
@@ -210,6 +246,12 @@ type = "index"
 name = "orchestration_v2_projection_turn_items_user_message_idx"
 tbl_name = "orchestration_v2_projection_turn_items"
 sql = "CREATE INDEX orchestration_v2_projection_turn_items_user_message_idx\n    ON orchestration_v2_projection_turn_items(thread_id, ordinal, turn_item_id)\n    WHERE type = 'user_message'\n  "
+
+[[objects]]
+type = "index"
+name = "orchestration_v2_projection_turn_items_waiting_link_idx"
+tbl_name = "orchestration_v2_projection_turn_items"
+sql = "CREATE INDEX orchestration_v2_projection_turn_items_waiting_link_idx\n    ON orchestration_v2_projection_turn_items(thread_id, updated_at DESC, turn_item_id DESC)\n    WHERE type = 'link_request' AND status = 'waiting'\n  "
 
 [[objects]]
 type = "table"
