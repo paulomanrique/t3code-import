@@ -353,6 +353,13 @@ pub struct Thread {
     )]
     pub active_order_key: Option<Null<String>>,
     pub last_visited_at: Null<IsoDate>,
+    // T3 decodes `opens` leniently: a malformed value reads as null, so any value passes.
+    #[serde(
+        default,
+        deserialize_with = "optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub opens: Option<Value>,
     #[serde(
         default,
         deserialize_with = "optional_nullable",
@@ -561,6 +568,19 @@ pub struct NativeMetadata {
         skip_serializing_if = "Option::is_none"
     )]
     pub item_identity_version: Option<u64>,
+    #[serde(
+        default,
+        deserialize_with = "optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub claude_attachment_budget: Option<AttachmentBudget>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AttachmentBudget {
+    pub bytes_used: u64,
+    pub pages_used: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -897,8 +917,16 @@ pub struct ImportSource {
     pub size: u64,
     pub mtime_ms: Null<serde_json::Number>,
     pub device: serde_json::Number,
-    pub inode: Null<serde_json::Number>,
+    pub inode: Null<Inode>,
     pub birthtime_ms: Null<serde_json::Number>,
+}
+
+/// T3 0.1.6 stores inodes as strings; earlier versions stored numbers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Inode {
+    Text(String),
+    Number(serde_json::Number),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
